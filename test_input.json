@@ -1,0 +1,8 @@
+{
+    "input": {
+        "video_url": "https://example.com/test_video.mp4",
+        "target_lang": "sk",
+        "source_lang": "en",
+        "reference_audio_url": null
+    }
+}
