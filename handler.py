@@ -232,4 +232,20 @@ def handler(job: dict) -> dict:
 
 
 if __name__ == "__main__":
-    runpod.serverless.start({"handler": handler})
+    # Na RunPod Pode nie je test_input.json -> serverless.start() crashuje.
+    # Ak najde test_input.json, spusti job priamo (Pod / lokalne testovanie).
+    # Ak nie, spusti serverless worker (Serverless endpoint).
+    test_input_path = os.path.join(os.path.dirname(__file__), "test_input.json")
+
+    if os.path.exists(test_input_path):
+        import json as _json
+        logger.info("[local] Found test_input.json, running single job...")
+        with open(test_input_path) as f:
+            test_job = _json.load(f)
+        job = {"id": "local-test", "input": test_job.get("input", test_job)}
+        result = handler(job)
+        print("\n=== RESULT ===")
+        print(_json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        logger.info("[serverless] No test_input.json, starting RunPod serverless worker...")
+        runpod.serverless.start({"handler": handler})
