@@ -1,6 +1,9 @@
 # RunPod SDK
 runpod>=1.7.0
 
+# Video download
+yt-dlp>=2024.1.0
+
 # Audio separation
 demucs>=4.0.1
 

@@ -23,6 +23,7 @@ import uuid
 import base64
 import logging
 import tempfile
+import subprocess
 import requests
 
 import runpod
@@ -48,13 +49,57 @@ BASE64_SIZE_LIMIT = 50 * 1024 * 1024  # 50 MB
 
 # --- Pomocne funkcie ---
 
+YT_DOMAINS = ("youtube.com", "youtu.be", "vimeo.com", "dailymotion.com")
+
+
+def _is_yt_url(url: str) -> bool:
+    return any(d in url for d in YT_DOMAINS)
+
+
+def download_video(url: str, dest_path: str, job_id: str) -> str:
+    """
+    Stiahne video z URL do dest_path.
+    - YouTube / yt-dlp kompatibilné URL -> yt-dlp (max 1080p MP4)
+    - Priame HTTP URL -> requests stream
+    """
+    if _is_yt_url(url):
+        logger.info(f"[{job_id}] yt-dlp download: {url}")
+        cmd = [
+            "yt-dlp",
+            "-f", "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "--merge-output-format", "mp4",
+            "-o", dest_path,
+            "--no-playlist",
+            url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            raise RuntimeError(f"yt-dlp failed: {result.stderr[-500:]}")
+    else:
+        logger.info(f"[{job_id}] Direct download: {url}")
+        with requests.get(url, stream=True, timeout=300) as r:
+            r.raise_for_status()
+            downloaded = 0
+            with open(dest_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+        logger.info(f"[{job_id}] Downloaded {downloaded / 1024 / 1024:.1f} MB")
+
+    if not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
+        raise RuntimeError(f"Downloaded file missing or empty: {dest_path}")
+
+    logger.info(f"[{job_id}] Video ready: {os.path.getsize(dest_path) // 1024 // 1024} MB")
+    return dest_path
+
+
 def download_file(url: str, dest_path: str, job_id: str) -> str:
-    """Stiahne subor z URL do dest_path. Timeout 5 min pre velke videa."""
-    logger.info(f"[{job_id}] Downloading -> {dest_path} ({url})")
+    """Stiahne obecny subor (audio, ref) cez HTTP. Timeout 5 min."""
+    logger.info(f"[{job_id}] Downloading file -> {dest_path}")
     with requests.get(url, stream=True, timeout=300) as r:
         r.raise_for_status()
+        downloaded = 0
         with open(dest_path, "wb") as f:
-            downloaded = 0
             for chunk in r.iter_content(chunk_size=1024 * 1024):
                 f.write(chunk)
                 downloaded += len(chunk)
@@ -138,9 +183,9 @@ def handler(job: dict) -> dict:
     # --- Spracovanie ---
     with tempfile.TemporaryDirectory(prefix=f"job_{job_id}_") as workdir:
         try:
-            # Stiahnutie videa
+            # Stiahnutie videa (yt-dlp pre YouTube, requests pre priame URL)
             video_path = os.path.join(workdir, "input.mp4")
-            download_file(video_url, video_path, job_id)
+            download_video(video_url, video_path, job_id)
 
             # Stiahnutie referencneho audia (ak zadane)
             ref_audio_path = None
