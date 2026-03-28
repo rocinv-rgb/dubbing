@@ -88,8 +88,12 @@ def get_xtts():
         from TTS.api import TTS as CoquiTTS
         xtts_cache = str(MODEL_DIR / "xtts_v2")
         _os.environ["COQUI_TTS_HOME"] = str(MODEL_DIR)
-        logger.info(f"Loading XTTS v2 (cache: {xtts_cache})...")
-        tts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2")
+        xtts_exists = (MODEL_DIR / "xtts_v2").exists()
+        if xtts_exists:
+            logger.info(f"Loading XTTS v2 from cache: {xtts_cache}")
+        else:
+            logger.info(f"XTTS v2 not found in cache, downloading to {xtts_cache} (~1.8GB, moze trvat niekolko minut)...")
+        tts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=True)
         tts.to(DEVICE)
         _xtts_model = tts
         logger.info("XTTS v2 loaded.")
