@@ -152,8 +152,10 @@ def handler(job: dict) -> dict:
     Hlavny RunPod serverless handler.
     Vrati dict s vysledkom alebo {"error": "..."} pri zlyhaní.
     """
-    job_id = job.get("id", str(uuid.uuid4())[:8])
     job_input = job.get("input", {})
+    # job_id z inputu umoznuje fixnu cache pri ladeni ("test", "fix", atd.)
+    # V produkcii sa pouzije RunPod job ID
+    job_id = job_input.get("job_id") or job.get("id", str(uuid.uuid4())[:8])
 
     logger.info(f"[{job_id}] Job started")
 
