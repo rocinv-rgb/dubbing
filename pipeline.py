@@ -84,17 +84,9 @@ def get_xtts():
     """Lazy-load XTTS v2 (Coqui TTS). Nevyzaduje nvcc ani deepspeed."""
     global _xtts_model
     if _xtts_model is None:
-        import os as _os
         from TTS.api import TTS as CoquiTTS
-        xtts_cache = str(MODEL_DIR / "xtts_v2")
-        _os.environ["COQUI_TTS_HOME"] = str(MODEL_DIR)
-        _os.environ["COQUI_TTS_AGREED_TO_CPML"] = "1"
-        xtts_exists = (MODEL_DIR / "xtts_v2").exists()
-        if xtts_exists:
-            logger.info(f"Loading XTTS v2 from cache: {xtts_cache}")
-        else:
-            logger.info(f"XTTS v2 not found in cache, downloading to {xtts_cache} (~1.8GB, moze trvat niekolko minut)...")
-        tts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=True)
+        logger.info("Loading XTTS v2...")
+        tts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2")
         tts.to(DEVICE)
         _xtts_model = tts
         logger.info("XTTS v2 loaded.")
@@ -201,14 +193,23 @@ def step_translate(segments: list[dict], target_lang: str = "sk") -> list[dict]:
             ensure_ascii=False,
         )
         prompt = (
-            f'Translate each "text" value to {lang_name}.\n'
-            f'Return ONLY a valid JSON array. No explanation, no markdown, no preamble.\n\n'
+            f'You are a professional subtitle translator. Translate each "text" value to {lang_name}.\n'
+            f'Rules:\n'
+            f'- Natural, fluent speech — NOT word-for-word literal translation\n'
+            f'- Keep the same meaning and tone as the original\n'
+            f'- Short sentences preferred (this is dubbing audio)\n'
+            f'- Return ONLY a valid JSON array. No explanation, no markdown, no preamble, no thinking.\n\n'
             f'Example input:  [{{"id": 0, "text": "Hello world"}}, {{"id": 1, "text": "How are you?"}}]\n'
             f'Example output: [{{"id": 0, "text": "Ahoj svet"}}, {{"id": 1, "text": "Ako sa mas?"}}]\n\n'
             f'Input: {items_json}\n'
             f'Output:'
         )
-        response = pipe([{"role": "user", "content": prompt}], return_full_text=False)
+        response = pipe(
+            [{"role": "user", "content": prompt}],
+            return_full_text=False,
+            temperature=0.3,
+            do_sample=True,
+        )
         raw = response[0]["generated_text"].strip()
         lines = _parse_translation_json(raw, len(batch))
 
@@ -241,6 +242,13 @@ def step_tts_clone(
     model = get_xtts()
     tts_sample_rate = 24000
 
+    # Validate reference audio — XTTS needs at least 3s of clean audio
+    ref_data, ref_sr = sf.read(reference_audio_path, dtype="float32")
+    ref_duration = len(ref_data) / ref_sr
+    logger.info(f"Reference audio: {ref_duration:.1f}s @ {ref_sr}Hz")
+    if ref_duration < 3.0:
+        logger.warning(f"Reference audio too short ({ref_duration:.1f}s < 3s) — voice cloning may be poor")
+
     all_audio_chunks: list[np.ndarray] = []
     prev_end = 0.0
 
@@ -261,11 +269,19 @@ def step_tts_clone(
                 language=xtts_lang,
                 file_path=tmp_out,
             )
-            audio_data, _ = sf.read(tmp_out, dtype="float32")
+            if not os.path.exists(tmp_out) or os.path.getsize(tmp_out) < 100:
+                raise RuntimeError(f"TTS output missing or empty: {tmp_out}")
+            audio_data, sr = sf.read(tmp_out, dtype="float32")
             if audio_data.ndim > 1:
                 audio_data = audio_data.mean(axis=1)
+            if len(audio_data) == 0:
+                raise RuntimeError("TTS returned zero-length audio")
+            # Normalize to avoid clipping / silence from near-zero output
+            peak = np.abs(audio_data).max()
+            if peak > 0:
+                audio_data = audio_data / peak * 0.9
             all_audio_chunks.append(audio_data)
-            logger.debug(f"Segment {i}: '{text[:50]}' -> {len(audio_data)/tts_sample_rate:.2f}s")
+            logger.info(f"Segment {i}: '{text[:50]}' -> {len(audio_data)/tts_sample_rate:.2f}s (peak={peak:.3f})")
         except Exception as e:
             logger.warning(f"TTS failed for segment {i} '{text[:60]}': {e}")
             dur = seg["end"] - seg["start"]
