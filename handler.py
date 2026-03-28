@@ -203,6 +203,7 @@ def handler(job: dict) -> dict:
                 target_lang=target_lang,
                 source_lang=source_lang,
                 output_path=output_path,
+                job_id=job_id,
             )
             logger.info(
                 f"[{job_id}] Pipeline done | "
