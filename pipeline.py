@@ -88,6 +88,7 @@ def get_xtts():
         from TTS.api import TTS as CoquiTTS
         xtts_cache = str(MODEL_DIR / "xtts_v2")
         _os.environ["COQUI_TTS_HOME"] = str(MODEL_DIR)
+        _os.environ["COQUI_TTS_AGREED_TO_CPML"] = "1"
         xtts_exists = (MODEL_DIR / "xtts_v2").exists()
         if xtts_exists:
             logger.info(f"Loading XTTS v2 from cache: {xtts_cache}")
