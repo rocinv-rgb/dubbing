@@ -4,9 +4,6 @@ runpod>=1.7.0
 # Video download
 yt-dlp>=2024.1.0
 
-# Audio separation
-demucs>=4.0.1
-
 # Transcription
 openai-whisper>=20231117
 
@@ -16,7 +13,7 @@ accelerate>=0.33.0
 bitsandbytes>=0.43.0
 
 # POZOR: torch / torchvision / torchaudio sa inštalujú v Dockerfile
-# s explicitnou CUDA 12.1 verziou (--index-url pytorch.whl/cu121).
+# s explicitnou CUDA 12.8 nightly verziou (--index-url pytorch.whl/nightly/cu128).
 # NEDÁVAJ ich sem — pip by stiahol CPU build a prepísal CUDA verziu.
 
 # Audio utils
