@@ -1,17 +1,19 @@
 """
 pipeline.py - AI Dubbing Pipeline
-Kroky: FFmpeg -> Demucs -> Whisper -> Qwen3 (preklad) -> XTTS v2 (TTS+klonovanie) -> FFmpeg mix
+Kroky: FFmpeg -> Whisper -> Qwen3-14B (preklad) -> XTTS v2 (TTS+klonovanie) -> FFmpeg mix
 
-Opravy v1.1:
-- Demucs: odstranene --mp3, vystup je WAV + ffmpeg resample na 16kHz
-- Qwen parser: JSON mode s few-shot promptom, odolny voci verbose prefixom
-- XTTS v2 (Coqui TTS): nahradzuje CosyVoice2 (nevyzaduje nvcc/deepspeed)
+Verzia 1.2:
+- Demucs odstraneny (padal na nvcc) — pouziva cele audio
+- CosyVoice2 nahradeny za Coqui XTTS v2 (nevyzaduje nvcc/deepspeed)
+- Oprava: source_lang="auto" -> None pre Whisper API
+- Oprava: _xtts_model global (bolo _cosyvoice_model)
+- Oprava: cache adresare presunute na /workspace (perzistentny Volume), nie do docasneho workdir
 """
 
 import os
-import sys
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import logging
@@ -22,8 +24,6 @@ import soundfile as sf
 import numpy as np
 
 
-# Timeout pre FFmpeg — zabrani zaseknutiu warm podu pri korumpovanych suboroch.
-# 120s pre kratke operacie (extract/resample), 600s pre finalny mix dlheho videa.
 def _ffmpeg(cmd: list[str], timeout: int = 120, step: str = "ffmpeg") -> None:
     """Spusti FFmpeg s timeoutom. Pri chybe vypise stderr pre debugovanie."""
     try:
@@ -41,12 +41,13 @@ def _ffmpeg(cmd: list[str], timeout: int = 120, step: str = "ffmpeg") -> None:
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/workspace/models"))
+CACHE_DIR = Path(os.environ.get("CACHE_DIR", "/workspace/cache"))
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# --- Lazy-loaded globals (nacitaju sa raz pri prvom jobu = warm start) ---
+# Lazy-loaded globals (nacitaju sa raz pri prvom jobu = warm start)
 _whisper_model = None
 _qwen_pipe = None
-_cosyvoice_model = None
+_xtts_model = None
 
 
 def get_whisper():
@@ -66,9 +67,8 @@ def get_qwen():
     global _qwen_pipe
     if _qwen_pipe is None:
         from transformers import pipeline
-        model_id = str(MODEL_DIR / "qwen3-14B")
-        if not (MODEL_DIR / "qwen3-14B").exists():
-            model_id = "Qwen/Qwen3-14B"  # HF download fallback
+        model_path = MODEL_DIR / "qwen3-14B"
+        model_id = str(model_path) if model_path.exists() else "Qwen/Qwen3-14B"
         logger.info(f"Loading Qwen3-14B from {model_id}...")
         _qwen_pipe = pipeline(
             "text-generation",
@@ -81,17 +81,16 @@ def get_qwen():
 
 
 def get_xtts():
-    """Lazy-load XTTS v2 model (Coqui TTS)."""
-    global _cosyvoice_model  # reuse existing global slot
-    if _cosyvoice_model is None:
+    """Lazy-load XTTS v2 (Coqui TTS). Nevyzaduje nvcc ani deepspeed."""
+    global _xtts_model
+    if _xtts_model is None:
         from TTS.api import TTS as CoquiTTS
         logger.info("Loading XTTS v2...")
-        # xtts_v2 sa stiahne automaticky do ~/.local/share/tts ak neexistuje
         tts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2")
         tts.to(DEVICE)
-        _cosyvoice_model = tts
+        _xtts_model = tts
         logger.info("XTTS v2 loaded.")
-    return _cosyvoice_model
+    return _xtts_model
 
 
 # --- Pipeline kroky ---
@@ -99,47 +98,43 @@ def get_xtts():
 def step_extract_audio(video_path: str, workdir: str) -> str:
     """FFmpeg: extrahuje audio z videa ako WAV 16kHz mono."""
     out = os.path.join(workdir, "audio_raw.wav")
-    cmd = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-ar", "16000", "-ac", "1", "-vn",
-        out,
-    ]
-    _ffmpeg(cmd, timeout=120, step="extract_audio")
+    _ffmpeg(
+        ["ffmpeg", "-y", "-i", video_path, "-ar", "16000", "-ac", "1", "-vn", out],
+        timeout=120, step="extract_audio"
+    )
     logger.info(f"Audio extracted: {out}")
     return out
 
 
-def step_separate_audio(audio_path: str, workdir: str) -> tuple[str, str]:
+def step_prepare_audio(audio_path: str, workdir: str) -> tuple[str, str]:
     """
-    Bez Demucs — pouziva cele audio pre transkripciu aj ako sprievod.
-    Novy hlas v step_mix_final nahradi povodne audio uplne.
+    Bez Demucs separacie — pouziva cele audio pre Whisper aj ako sprievod.
+    Vracia (vocals_path, accompaniment_path).
     """
-    # Sprievod = povodne audio (FFmpeg mix ho potlaci pod novy hlas)
-    accompaniment = audio_path
-
-    # Vocals pre Whisper = cele audio (Whisper si poradí aj so zvukom v pozadi)
     vocals_16k = os.path.join(workdir, "vocals_16k.wav")
     _ffmpeg(
         ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", vocals_16k],
         timeout=120, step="resample_vocals"
     )
-
-    logger.info(f"No separation — vocals={vocals_16k}, accompaniment={accompaniment}")
-    return vocals_16k, accompaniment
+    logger.info(f"Audio prepared — vocals={vocals_16k}, accompaniment={audio_path}")
+    return vocals_16k, audio_path
 
 
 def step_transcribe(vocals_path: str, source_lang: str | None = None) -> list[dict]:
     """
     Whisper large-v3: transkripcia s timestampmi.
-    source_lang=None -> Whisper automaticky detekuje jazyk (spanielcina, cistina, arabcina...).
-    Vracia list segmentov: [{start, end, text}, ...]
+    source_lang=None -> auto-detect jazyka (spanielcina, cistina, arabcina...).
+    POZOR: Whisper ocakava None pre auto-detect, nie retazec "auto".
     """
     model = get_whisper()
-    lang_display = source_lang or "auto-detect"
-    logger.info(f"Transcribing... (language={lang_display})")
+    # Normalizacia: "auto" alebo prazdny retazec -> None
+    if source_lang and source_lang.lower() in ("auto", ""):
+        source_lang = None
+
+    logger.info(f"Transcribing... (language={source_lang or 'auto-detect'})")
     result = model.transcribe(
         vocals_path,
-        language=source_lang,   # None = auto-detection
+        language=source_lang,
         word_timestamps=True,
         verbose=False,
     )
@@ -154,20 +149,10 @@ def step_transcribe(vocals_path: str, source_lang: str | None = None) -> list[di
 def _parse_translation_json(raw: str, batch_size: int) -> dict[int, str]:
     """
     Robustny parser pre JSON vystup z Qwen3.
-
-    Fallback hierarchia:
-    1. Priamo parse JSON array
-    2. Extrahovanie JSON array regexom (zvlada prose pred/po JSON)
-    3. Prazdny dict -> caller pouzije originalny text ako fallback
-
-    Zvlada: markdown fences, "Here is the translation:" prefix,
-    trailing whitespace, unicode apostrofy.
+    Zvlada: markdown fences, verbose prefix, multiline JSON.
+    [\s\S]* namiesto .*? — spolahlive pre multiline.
     """
-    # Stripni markdown fences
     clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-
-    # Najdi prvu [ ... ] strukturu v texte.
-    # [\s\S]* namiesto .*? -- spolahlive zachyti multiline JSON aj ked Qwen3 prida prose pred arraym.
     match = re.search(r"(\[[\s\S]*\])", clean)
     if match:
         clean = match.group(1)
@@ -188,16 +173,13 @@ def _parse_translation_json(raw: str, batch_size: int) -> dict[int, str]:
 
 def step_translate(segments: list[dict], target_lang: str = "sk") -> list[dict]:
     """
-    Qwen3-32B: prelozi segmenty, zachova timing.
-
-    OPRAVA: pouziva JSON mode s few-shot promptom namiesto krehkeho
-    riadkoveho parsera. Qwen3 pridava verbose prefix ("Here is..."),
-    co stary parser rozbijalo. JSON format je deterministicky.
+    Qwen3-14B: prelozi segmenty v batchoch 20, zachova timing.
+    Few-shot JSON prompt — odolny voci verbose prefixom modelu.
     """
     LANG_NAMES = {
         "sk": "Slovak", "cs": "Czech", "de": "German",
         "fr": "French", "es": "Spanish", "it": "Italian",
-        "pl": "Polish", "hu": "Hungarian",
+        "pl": "Polish", "hu": "Hungarian", "uk": "Ukrainian", "ru": "Russian",
     }
     lang_name = LANG_NAMES.get(target_lang, target_lang)
     pipe = get_qwen()
@@ -206,33 +188,26 @@ def step_translate(segments: list[dict], target_lang: str = "sk") -> list[dict]:
     batch_size = 20
     for i in range(0, len(segments), batch_size):
         batch = segments[i:i + batch_size]
-
         items_json = json.dumps(
             [{"id": j, "text": seg["text"]} for j, seg in enumerate(batch)],
             ensure_ascii=False,
         )
-
-        # Few-shot prompt ukazuje presny format vstupu aj vystupu
         prompt = (
-            f'Translate each "text" value from English to {lang_name}.\n'
+            f'Translate each "text" value to {lang_name}.\n'
             f'Return ONLY a valid JSON array. No explanation, no markdown, no preamble.\n\n'
             f'Example input:  [{{"id": 0, "text": "Hello world"}}, {{"id": 1, "text": "How are you?"}}]\n'
             f'Example output: [{{"id": 0, "text": "Ahoj svet"}}, {{"id": 1, "text": "Ako sa mas?"}}]\n\n'
             f'Input: {items_json}\n'
             f'Output:'
         )
-
-        response = pipe(
-            [{"role": "user", "content": prompt}],
-            return_full_text=False,
-        )
+        response = pipe([{"role": "user", "content": prompt}], return_full_text=False)
         raw = response[0]["generated_text"].strip()
         lines = _parse_translation_json(raw, len(batch))
 
         for j, seg in enumerate(batch):
             translated.append({
                 **seg,
-                "translated": lines.get(j, seg["text"]),  # fallback = original text
+                "translated": lines.get(j, seg["text"]),  # fallback = original
             })
 
     logger.info(f"Translated {len(translated)} segments")
@@ -247,8 +222,7 @@ def step_tts_clone(
 ) -> str:
     """
     XTTS v2 (Coqui TTS) zero-shot voice cloning.
-    Syntetizuje prelozene segmenty s klonovanym hlasom.
-    Sample rate vystupu: 24 000 Hz.
+    Sample rate vystupu: 24000 Hz.
     """
     XTTS_LANG_MAP = {
         "sk": "sk", "cs": "cs", "de": "de", "fr": "fr",
@@ -256,9 +230,8 @@ def step_tts_clone(
         "uk": "uk", "ru": "ru",
     }
     xtts_lang = XTTS_LANG_MAP.get(target_lang, "en")
-
     model = get_xtts()
-    tts_sample_rate = 24000  # XTTS v2 vystupny sample rate
+    tts_sample_rate = 24000
 
     all_audio_chunks: list[np.ndarray] = []
     prev_end = 0.0
@@ -268,12 +241,10 @@ def step_tts_clone(
         if not text:
             continue
 
-        # Ticho pre medzeru medzi segmentmi
         gap = seg["start"] - prev_end
         if gap > 0.05:
             all_audio_chunks.append(np.zeros(int(gap * tts_sample_rate), dtype=np.float32))
 
-        # TTS synteza - XTTS v2
         try:
             tmp_out = os.path.join(workdir, f"seg_{i:04d}.wav")
             model.tts_to_file(
@@ -284,7 +255,7 @@ def step_tts_clone(
             )
             audio_data, _ = sf.read(tmp_out, dtype="float32")
             if audio_data.ndim > 1:
-                audio_data = audio_data.mean(axis=1)  # stereo -> mono
+                audio_data = audio_data.mean(axis=1)
             all_audio_chunks.append(audio_data)
             logger.debug(f"Segment {i}: '{text[:50]}' -> {len(audio_data)/tts_sample_rate:.2f}s")
         except Exception as e:
@@ -313,19 +284,18 @@ def step_mix_final(
     output_path: str,
 ) -> str:
     """
-    FFmpeg: zmiesaj novy hlas + hudba/zvuky + zachovaj video track.
-    Hlas: 0 dB, Sprievod: 0.7x (-3 dB) — jemne potlaceny pod hlasom.
+    FFmpeg: zmiesaj novy hlas (0dB) + sprievod (0.7x) + zachovaj video.
     """
     cmd = [
         "ffmpeg", "-y",
-        "-i", original_video,       # [0] video
-        "-i", dubbed_voice,          # [1] novy hlas
-        "-i", accompaniment,         # [2] hudba + zvuky
+        "-i", original_video,
+        "-i", dubbed_voice,
+        "-i", accompaniment,
         "-filter_complex",
         "[1:a]volume=1.0[voice];[2:a]volume=0.7[music];[voice][music]amix=inputs=2:duration=first[aout]",
         "-map", "0:v",
         "-map", "[aout]",
-        "-c:v", "copy",             # video bez reenkodovania
+        "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
         "-shortest",
         output_path,
@@ -343,53 +313,62 @@ def run_dubbing_pipeline(
     target_lang: str,
     source_lang: str | None,
     output_path: str,
+    job_id: str = "local",
 ) -> dict:
     """
-    Spusti cely pipeline. Ak reference_audio_path nie je zadany,
-    pouzije extrahovany hlas z videa ako referenciu.
+    Spusti cely pipeline.
+    Cache (transcription, translation, dubbed_voice) sa uklada do CACHE_DIR/<job_id>/
+    na perzistentnom Volume — prezije restart podu.
     """
-    with tempfile.TemporaryDirectory(prefix="dubbing_") as workdir:
+    # Cache adresár na Volume (perzistentny), nie v docasnom workdir
+    job_cache = CACHE_DIR / job_id
+    job_cache.mkdir(parents=True, exist_ok=True)
+
+    transcription_cache = job_cache / "transcription.json"
+    translation_cache   = job_cache / "translation.json"
+    dubbed_voice_cache  = job_cache / "dubbed_voice.wav"
+
+    with tempfile.TemporaryDirectory(prefix=f"dubbing_{job_id}_") as workdir:
         # 1. Extrakcia audia
         raw_audio = step_extract_audio(video_path, workdir)
 
-        # 2. Separacia Demucs
-        vocals, accompaniment = step_separate_audio(raw_audio, workdir)
+        # 2. Priprava audia (bez Demucs)
+        vocals, accompaniment = step_prepare_audio(raw_audio, workdir)
 
-        # Referencia pre klonovanie = povodny hlas ak nie je zadany
+        # Referencia pre klonovanie
         ref_audio = reference_audio_path or vocals
 
         # 3. Transkripcia (cache)
-        transcription_cache = os.path.join(os.path.dirname(output_path), 'transcription.json')
-        if os.path.exists(transcription_cache):
-            logger.info(f'Loading cached transcription: {transcription_cache}')
-            import json as _json
-            segments = _json.load(open(transcription_cache))
+        if transcription_cache.exists():
+            logger.info(f"Loading cached transcription: {transcription_cache}")
+            segments = json.loads(transcription_cache.read_text())
         else:
             segments = step_transcribe(vocals, source_lang)
-            import json as _json
-            _json.dump(segments, open(transcription_cache, 'w'), ensure_ascii=False, indent=2)
-            logger.info(f'Transcription saved: {transcription_cache}')
+            transcription_cache.write_text(
+                json.dumps(segments, ensure_ascii=False, indent=2)
+            )
+            logger.info(f"Transcription cached: {transcription_cache}")
 
         # 4. Preklad (cache)
-        translation_cache = os.path.join(os.path.dirname(output_path), 'translation.json')
-        if os.path.exists(translation_cache):
-            logger.info(f'Loading cached translation: {translation_cache}')
-            segments = _json.load(open(translation_cache))
+        if translation_cache.exists():
+            logger.info(f"Loading cached translation: {translation_cache}")
+            segments = json.loads(translation_cache.read_text())
         else:
             segments = step_translate(segments, target_lang)
-            _json.dump(segments, open(translation_cache, 'w'), ensure_ascii=False, indent=2)
-            logger.info(f'Translation saved: {translation_cache}')
+            translation_cache.write_text(
+                json.dumps(segments, ensure_ascii=False, indent=2)
+            )
+            logger.info(f"Translation cached: {translation_cache}")
 
-        # 5. TTS s klonovanim hlasu (cache)
-        dubbed_voice_cache = os.path.join(os.path.dirname(output_path), 'dubbed_voice.wav')
-        if os.path.exists(dubbed_voice_cache):
-            logger.info(f'Loading cached dubbed voice: {dubbed_voice_cache}')
-            dubbed_voice = dubbed_voice_cache
+        # 5. TTS (cache)
+        if dubbed_voice_cache.exists():
+            logger.info(f"Loading cached dubbed voice: {dubbed_voice_cache}")
+            dubbed_voice = str(dubbed_voice_cache)
         else:
-            dubbed_voice = step_tts_clone(segments, ref_audio, workdir, target_lang)
-            import shutil
-            shutil.copy(dubbed_voice, dubbed_voice_cache)
-            logger.info(f'Dubbed voice saved: {dubbed_voice_cache}')
+            dubbed_voice_tmp = step_tts_clone(segments, ref_audio, workdir, target_lang)
+            shutil.copy(dubbed_voice_tmp, dubbed_voice_cache)
+            dubbed_voice = str(dubbed_voice_cache)
+            logger.info(f"Dubbed voice cached: {dubbed_voice_cache}")
 
         # 6. Finalny mix
         step_mix_final(video_path, dubbed_voice, accompaniment, workdir, output_path)
