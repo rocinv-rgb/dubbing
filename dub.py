@@ -177,7 +177,7 @@ Príklady:
             video_path=video_path,
             reference_audio_path=args.ref,
             target_lang=args.lang,
-            source_lang=args.source_lang or "auto",
+            source_lang=args.source_lang or None,  # None = Whisper auto-detect
             output_path=output_path,
         )
 
