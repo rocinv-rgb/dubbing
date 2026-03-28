@@ -3,11 +3,6 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [master]
-    paths:
-      - 'Dockerfile'
-      - 'pipeline.py'
-      - 'handler.py'
-      - 'requirements.txt'
   workflow_dispatch:  # manualne spustenie z GitHub UI
 
 jobs:
