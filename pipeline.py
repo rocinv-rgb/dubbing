@@ -75,7 +75,7 @@ def get_qwen():
             model=model_id,
             device_map="auto",
             torch_dtype=torch.bfloat16,
-            max_new_tokens=4096,
+            max_new_tokens=1024,
         )
     return _qwen_pipe
 
