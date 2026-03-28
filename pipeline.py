@@ -84,8 +84,11 @@ def get_xtts():
     """Lazy-load XTTS v2 (Coqui TTS). Nevyzaduje nvcc ani deepspeed."""
     global _xtts_model
     if _xtts_model is None:
+        import os as _os
         from TTS.api import TTS as CoquiTTS
-        logger.info("Loading XTTS v2...")
+        xtts_cache = str(MODEL_DIR / "xtts_v2")
+        _os.environ["COQUI_TTS_HOME"] = str(MODEL_DIR)
+        logger.info(f"Loading XTTS v2 (cache: {xtts_cache})...")
         tts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2")
         tts.to(DEVICE)
         _xtts_model = tts
