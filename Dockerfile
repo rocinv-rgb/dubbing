@@ -1,10 +1,10 @@
-# AI Dubbing Pipeline — RunPod A100 80GB
-# Base: CUDA 12.1 + cuDNN 8 + Python 3.10
-FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+# AI Dubbing Pipeline — RunPod
+# Base: CUDA 12.8 + cuDNN + Python 3.10 (podporuje Blackwell sm_120)
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
 
 LABEL maintainer="dubbing-pipeline" \
-      version="1.1.0" \
-      description="AI dubbing: Demucs + Whisper + Qwen3 + CosyVoice2"
+      version="3.0.0" \
+      description="AI dubbing: Whisper + Qwen3 + XTTS v2"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -14,46 +14,38 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
-# System deps: FFmpeg, sox, git-lfs
-# python3.10-dev vynechané — nie je potrebné pre runtime
+# System deps
 RUN apt-get update && apt-get install -y \
     python3.10 python3-pip \
     ffmpeg sox libsox-dev \
-    git git-lfs curl wget \
+    git curl wget \
     libsndfile1 libgomp1 \
-    && git lfs install \
+    espeak-ng \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Python alias
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python3 && \
-    ln -sf /usr/bin/python3 /usr/bin/python
+    ln -sf /usr/bin/python3 /usr/bin/python && \
+    pip install --upgrade pip setuptools wheel
 
-# --- PyTorch CUDA 12.1 (musí byť pred requirements.txt!) ---
-# Explicitná CUDA verzia — pip defaultne stiahne CPU build, čo na A100 nefunguje
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir \
-        torch==2.4.0 \
-        torchvision==0.19.0 \
-        torchaudio==2.4.0 \
-        --index-url https://download.pytorch.org/whl/cu121
+# --- Krok 1: PyTorch cu128 nightly (Blackwell) ---
+RUN pip install --no-cache-dir --pre \
+    torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/nightly/cu128
 
-# --- Ostatné Python závislosti (torch už je, requirements ho preskočí) ---
+# --- Krok 2: Ostatne zavislosti ---
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- CosyVoice2 ---
-RUN git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git /app/CosyVoice && \
-    cd /app/CosyVoice && pip install --no-cache-dir -r requirements.txt || true
-ENV PYTHONPATH="/app/CosyVoice:/app/CosyVoice/third_party/Matcha-TTS:${PYTHONPATH}"
+# --- Krok 3: Coqui TTS (XTTS v2) ---
+# Musí byť po torch — TTS si stiahne závislosti bez toho aby prepísal torch
+RUN pip install --no-cache-dir TTS>=0.22.0
 
-# --- Handler ---
+# --- App súbory ---
 COPY pipeline.py handler.py ./
 
-# Models sa načítajú z RunPod Network Volume (/workspace/models) za runtime
-# Ak volume nie je pripojený, handler ich stiahne pri prvom spustení
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'" || exit 1
 
 CMD ["python", "-u", "handler.py"]

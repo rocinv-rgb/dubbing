@@ -1,11 +1,11 @@
 """
 pipeline.py - AI Dubbing Pipeline
-Kroky: FFmpeg -> Demucs -> Whisper -> Qwen3 (preklad) -> CosyVoice2 (TTS+klonovanie) -> FFmpeg mix
+Kroky: FFmpeg -> Demucs -> Whisper -> Qwen3 (preklad) -> XTTS v2 (TTS+klonovanie) -> FFmpeg mix
 
 Opravy v1.1:
 - Demucs: odstranene --mp3, vystup je WAV + ffmpeg resample na 16kHz
 - Qwen parser: JSON mode s few-shot promptom, odolny voci verbose prefixom
-- CosyVoice2: explicitny .float() cast pred inferenciou
+- XTTS v2 (Coqui TTS): nahradzuje CosyVoice2 (nevyzaduje nvcc/deepspeed)
 """
 
 import os
@@ -66,7 +66,7 @@ def get_qwen():
     global _qwen_pipe
     if _qwen_pipe is None:
         from transformers import pipeline
-        model_id = str(MODEL_DIR / "qwen3-14b")
+        model_id = str(MODEL_DIR / "qwen3-14B")
         if not (MODEL_DIR / "qwen3-14B").exists():
             model_id = "Qwen/Qwen3-14B"  # HF download fallback
         logger.info(f"Loading Qwen3-14B from {model_id}...")
@@ -80,23 +80,17 @@ def get_qwen():
     return _qwen_pipe
 
 
-def get_cosyvoice():
-    global _cosyvoice_model
+def get_xtts():
+    """Lazy-load XTTS v2 model (Coqui TTS)."""
+    global _cosyvoice_model  # reuse existing global slot
     if _cosyvoice_model is None:
-        sys.path.insert(0, "/app/CosyVoice")
-        sys.path.insert(0, "/app/CosyVoice/third_party/Matcha-TTS")
-        from cosyvoice.cli.cosyvoice import CosyVoice2
-
-        model_path = MODEL_DIR / "CosyVoice2-0.5B"
-        if not model_path.exists():
-            from huggingface_hub import snapshot_download
-            logger.info("Downloading CosyVoice2-0.5B...")
-            snapshot_download(
-                "FunAudioLLM/CosyVoice2-0.5B",
-                local_dir=str(model_path),
-            )
-        logger.info("Loading CosyVoice2-0.5B...")
-        _cosyvoice_model = CosyVoice2(str(model_path), load_jit=False, load_trt=False)
+        from TTS.api import TTS as CoquiTTS
+        logger.info("Loading XTTS v2...")
+        # xtts_v2 sa stiahne automaticky do ~/.local/share/tts ak neexistuje
+        tts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2")
+        tts.to(DEVICE)
+        _cosyvoice_model = tts
+        logger.info("XTTS v2 loaded.")
     return _cosyvoice_model
 
 
@@ -117,39 +111,21 @@ def step_extract_audio(video_path: str, workdir: str) -> str:
 
 def step_separate_audio(audio_path: str, workdir: str) -> tuple[str, str]:
     """
-    Demucs htdemucs_ft: oddeli hlas (vocals) od hudby/zvukov (no_vocals).
-    Vracia (vocals_16k_path, accompaniment_path).
-
-    OPRAVA: --mp3 flag je odstraneny. torchaudio MP3 backend nie je
-    garantovany na vsetkych systemoch a moze crashnut bez lame/ffmpeg
-    MP3 dekodera. Demucs defaultne produkuje WAV, co je spolahlive.
+    Bez Demucs — pouziva cele audio pre transkripciu aj ako sprievod.
+    Novy hlas v step_mix_final nahradi povodne audio uplne.
     """
-    import demucs.separate
+    # Sprievod = povodne audio (FFmpeg mix ho potlaci pod novy hlas)
+    accompaniment = audio_path
 
-    out_dir = os.path.join(workdir, "demucs_out")
-    os.makedirs(out_dir, exist_ok=True)
-
-    demucs.separate.main([
-        "--model", "htdemucs_ft",
-        "--two-stems", "vocals",
-        "-o", out_dir,
-        audio_path,
-    ])
-
-    # Demucs uklada do out_dir/htdemucs_ft/<track_name>/
-    track_name = Path(audio_path).stem
-    vocals_wav = os.path.join(out_dir, "htdemucs_ft", track_name, "vocals.wav")
-    no_vocals_wav = os.path.join(out_dir, "htdemucs_ft", track_name, "no_vocals.wav")
-
-    # Resample na 16kHz mono pre Whisper (Demucs vracia 44.1kHz stereo)
-    vocals_16k = os.path.join(out_dir, "vocals_16k.wav")
+    # Vocals pre Whisper = cele audio (Whisper si poradí aj so zvukom v pozadi)
+    vocals_16k = os.path.join(workdir, "vocals_16k.wav")
     _ffmpeg(
-        ["ffmpeg", "-y", "-i", vocals_wav, "-ar", "16000", "-ac", "1", vocals_16k],
-        timeout=60, step="resample_vocals"
+        ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", vocals_16k],
+        timeout=120, step="resample_vocals"
     )
 
-    logger.info(f"Separated: vocals={vocals_16k}, accompaniment={no_vocals_wav}")
-    return vocals_16k, no_vocals_wav
+    logger.info(f"No separation — vocals={vocals_16k}, accompaniment={accompaniment}")
+    return vocals_16k, accompaniment
 
 
 def step_transcribe(vocals_path: str, source_lang: str | None = None) -> list[dict]:
@@ -270,49 +246,49 @@ def step_tts_clone(
     target_lang: str = "sk",
 ) -> str:
     """
-    CosyVoice2 zero-shot voice cloning: syntetizuje prelozene segmenty
-    s klonovanym hlasom. Vracia cestu k vysledku.
-
-    OPRAVA: ref_audio.float() a audio_data.float() — CosyVoice2 interna
-    infer moze failnut ak tensor ma nespravny dtype (napr. float16 z torchaudio).
+    XTTS v2 (Coqui TTS) zero-shot voice cloning.
+    Syntetizuje prelozene segmenty s klonovanym hlasom.
+    Sample rate vystupu: 24 000 Hz.
     """
-    import torchaudio
+    XTTS_LANG_MAP = {
+        "sk": "sk", "cs": "cs", "de": "de", "fr": "fr",
+        "es": "es", "it": "it", "pl": "pl", "hu": "hu",
+        "uk": "uk", "ru": "ru",
+    }
+    xtts_lang = XTTS_LANG_MAP.get(target_lang, "en")
 
-    model = get_cosyvoice()
-    tts_sample_rate = 22050  # CosyVoice2 vystupny sample rate
-
-    # Nacitaj referencny hlas (prvych 10 sekund)
-    ref_audio, ref_sr = torchaudio.load(reference_audio_path)
-    if ref_sr != 16000:
-        ref_audio = torchaudio.functional.resample(ref_audio, ref_sr, 16000)
-    ref_audio = ref_audio[:, : 16000 * 10]  # max 10s referencie
-    ref_audio = ref_audio.float()            # OPRAVA: explicitny float32
+    model = get_xtts()
+    tts_sample_rate = 24000  # XTTS v2 vystupny sample rate
 
     all_audio_chunks: list[np.ndarray] = []
     prev_end = 0.0
 
-    for seg in segments:
-        # Pridaj ticho ak je medzera medzi segmentmi
+    for i, seg in enumerate(segments):
+        text = seg.get("translated", seg.get("text", "")).strip()
+        if not text:
+            continue
+
+        # Ticho pre medzeru medzi segmentmi
         gap = seg["start"] - prev_end
         if gap > 0.05:
-            silence = np.zeros(int(gap * tts_sample_rate), dtype=np.float32)
-            all_audio_chunks.append(silence)
+            all_audio_chunks.append(np.zeros(int(gap * tts_sample_rate), dtype=np.float32))
 
-        # TTS synteza
+        # TTS synteza - XTTS v2
         try:
-            output = list(model.inference_zero_shot(
-                tts_text=seg["translated"],
-                prompt_text="",
-                prompt_speech_16k=ref_audio,
-                stream=False,
-            ))
-            if output:
-                # OPRAVA: .float() pred .numpy() — garantuje float32 dtype
-                audio_data = output[0]["tts_speech"].float().numpy().flatten()
-                all_audio_chunks.append(audio_data)
+            tmp_out = os.path.join(workdir, f"seg_{i:04d}.wav")
+            model.tts_to_file(
+                text=text,
+                speaker_wav=reference_audio_path,
+                language=xtts_lang,
+                file_path=tmp_out,
+            )
+            audio_data, _ = sf.read(tmp_out, dtype="float32")
+            if audio_data.ndim > 1:
+                audio_data = audio_data.mean(axis=1)  # stereo -> mono
+            all_audio_chunks.append(audio_data)
+            logger.debug(f"Segment {i}: '{text[:50]}' -> {len(audio_data)/tts_sample_rate:.2f}s")
         except Exception as e:
-            logger.warning(f"TTS failed for segment '{seg['translated'][:60]}': {e}")
-            # Fallback: ticho rovnako dlhe ako originalny segment
+            logger.warning(f"TTS failed for segment {i} '{text[:60]}': {e}")
             dur = seg["end"] - seg["start"]
             all_audio_chunks.append(np.zeros(int(dur * tts_sample_rate), dtype=np.float32))
 
@@ -321,11 +297,11 @@ def step_tts_clone(
     final_audio = (
         np.concatenate(all_audio_chunks)
         if all_audio_chunks
-        else np.zeros(1000, dtype=np.float32)
+        else np.zeros(tts_sample_rate, dtype=np.float32)
     )
     out_path = os.path.join(workdir, "dubbed_voice.wav")
     sf.write(out_path, final_audio, tts_sample_rate)
-    logger.info(f"TTS complete: {out_path}")
+    logger.info(f"TTS complete: {out_path} ({len(final_audio)/tts_sample_rate:.1f}s)")
     return out_path
 
 
@@ -382,14 +358,38 @@ def run_dubbing_pipeline(
         # Referencia pre klonovanie = povodny hlas ak nie je zadany
         ref_audio = reference_audio_path or vocals
 
-        # 3. Transkripcia
-        segments = step_transcribe(vocals, source_lang)
+        # 3. Transkripcia (cache)
+        transcription_cache = os.path.join(os.path.dirname(output_path), 'transcription.json')
+        if os.path.exists(transcription_cache):
+            logger.info(f'Loading cached transcription: {transcription_cache}')
+            import json as _json
+            segments = _json.load(open(transcription_cache))
+        else:
+            segments = step_transcribe(vocals, source_lang)
+            import json as _json
+            _json.dump(segments, open(transcription_cache, 'w'), ensure_ascii=False, indent=2)
+            logger.info(f'Transcription saved: {transcription_cache}')
 
-        # 4. Preklad
-        segments = step_translate(segments, target_lang)
+        # 4. Preklad (cache)
+        translation_cache = os.path.join(os.path.dirname(output_path), 'translation.json')
+        if os.path.exists(translation_cache):
+            logger.info(f'Loading cached translation: {translation_cache}')
+            segments = _json.load(open(translation_cache))
+        else:
+            segments = step_translate(segments, target_lang)
+            _json.dump(segments, open(translation_cache, 'w'), ensure_ascii=False, indent=2)
+            logger.info(f'Translation saved: {translation_cache}')
 
-        # 5. TTS s klonovanim hlasu
-        dubbed_voice = step_tts_clone(segments, ref_audio, workdir, target_lang)
+        # 5. TTS s klonovanim hlasu (cache)
+        dubbed_voice_cache = os.path.join(os.path.dirname(output_path), 'dubbed_voice.wav')
+        if os.path.exists(dubbed_voice_cache):
+            logger.info(f'Loading cached dubbed voice: {dubbed_voice_cache}')
+            dubbed_voice = dubbed_voice_cache
+        else:
+            dubbed_voice = step_tts_clone(segments, ref_audio, workdir, target_lang)
+            import shutil
+            shutil.copy(dubbed_voice, dubbed_voice_cache)
+            logger.info(f'Dubbed voice saved: {dubbed_voice_cache}')
 
         # 6. Finalny mix
         step_mix_final(video_path, dubbed_voice, accompaniment, workdir, output_path)
