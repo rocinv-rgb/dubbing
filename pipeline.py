@@ -195,23 +195,25 @@ def step_translate(segments: list[dict], target_lang: str = "sk") -> list[dict]:
             ensure_ascii=False,
         )
         prompt = (
-            f'You are a professional subtitle translator. Translate each "text" value to {lang_name}.\n'
+            f'Translate each "text" value to {lang_name} for dubbing (voice-over).\n'
             f'Rules:\n'
-            f'- Natural, fluent speech — NOT word-for-word literal translation\n'
-            f'- Keep the same meaning and tone as the original\n'
-            f'- Short sentences preferred (this is dubbing audio)\n'
-            f'- Return ONLY a valid JSON array. No explanation, no markdown, no preamble, no thinking.\n\n'
-            f'Example input:  [{{"id": 0, "text": "Hello world"}}, {{"id": 1, "text": "How are you?"}}]\n'
-            f'Example output: [{{"id": 0, "text": "Ahoj svet"}}, {{"id": 1, "text": "Ako sa mas?"}}]\n\n'
+            f'- Natural, fluent spoken language — NOT word-for-word\n'
+            f'- CRITICAL: translated text must have approximately the same number of words as the original (±30%)\n'
+            f'- If original is 5 words, translation must be ~4-7 words. If 15 words, ~10-20 words.\n'
+            f'- Keep meaning and tone. Short punchy sentences.\n'
+            f'- Return ONLY a valid JSON array. No explanation, no markdown, no preamble.\n\n'
+            f'Example input:  [{{"id": 0, "text": "Hello world"}}, {{"id": 1, "text": "How are you doing today?"}}]\n'
+            f'Example output: [{{"id": 0, "text": "Ahoj světe"}}, {{"id": 1, "text": "Jak se dnes máš?"}}]\n\n'
             f'Input: {items_json}\n'
             f'Output:'
         )
         response = pipe(
             [
-                {"role": "system", "content": "You are a professional translator. Reply with JSON only. No thinking, no explanation."},
+                {"role": "system", "content": "You are a professional translator. /no_think"},
                 {"role": "user", "content": prompt},
             ],
             return_full_text=False,
+            max_new_tokens=256,
             temperature=0.3,
             do_sample=True,
         )
