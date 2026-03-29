@@ -11,7 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     MODEL_DIR=/workspace/models \
-    CACHE_DIR=/workspace/cache
+    CACHE_DIR=/workspace/cache \
+    COQUI_TTS_AGREED_TO_CPML=1
 
 WORKDIR /app
 
