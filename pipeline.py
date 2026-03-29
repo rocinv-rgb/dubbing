@@ -169,10 +169,7 @@ def step_separate_audio(audio_path: str, workdir: str) -> tuple[str, str]:
 
     script = f"""
 import sys
-# Pridaj venv packages ale NECHAJ systemovy torch (CUDA)
-venv_site = '/venv-separator/lib/python3.10/site-packages'
-sys_site = [p for p in sys.path if 'site-packages' in p and 'venv-separator' not in p]
-sys.path = [venv_site] + sys_site
+sys.path.append('/venv-separator/lib/python3.10/site-packages')
 from audio_separator.separator import Separator
 import torch
 print('CUDA:', torch.cuda.is_available(), file=sys.stderr)
