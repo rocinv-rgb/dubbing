@@ -45,6 +45,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Musí byť po torch — TTS si stiahne závislosti bez toho aby prepísal torch
 RUN pip install --no-cache-dir TTS>=0.22.0
 
+# --- Krok 4: Separátny venv pre audio-separator (MDX23C) ---
+# Nemôže byť v hlavnom env — konflikt numpy 2.x vs 1.22 (TTS požiadavka)
+RUN python -m venv /venv-separator --system-site-packages=false && \
+    /venv-separator/bin/pip install --no-cache-dir --upgrade pip && \
+    /venv-separator/bin/pip install --no-cache-dir "audio-separator[gpu]"
+
 # --- App súbory ---
 COPY pipeline.py handler.py test_input.json ./
 
