@@ -64,6 +64,8 @@ DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
 
 _whisper_model   = None
 _qwen_pipe       = None
+_qwen_model      = None
+_qwen_tokenizer  = None
 _xtts_model      = None
 _diarize_pipeline = None
 
@@ -90,7 +92,7 @@ def get_whisper():
     return _whisper_model
 
 
-def get_qwen():
+def get_translator():
     global _qwen_pipe
     if _qwen_pipe is None:
         from transformers import pipeline
@@ -101,6 +103,21 @@ def get_qwen():
             device=0 if torch.cuda.is_available() else -1,
         )
     return _qwen_pipe
+
+
+def get_qwen():
+    global _qwen_model, _qwen_tokenizer
+    if _qwen_model is None:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        model_path = str(MODEL_DIR / "qwen3-14B")
+        logger.info(f"Loading Qwen3-14B from {model_path}...")
+        _qwen_tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        _qwen_model = AutoModelForCausalLM.from_pretrained(
+            model_path, trust_remote_code=True,
+            torch_dtype=torch.float16, device_map="auto"
+        )
+        logger.info("Qwen3-14B loaded.")
+    return _qwen_model, _qwen_tokenizer
 
 
 def get_xtts():
@@ -380,17 +397,72 @@ def step_extract_speaker_refs(
     return refs
 
 
+LANG_NAMES = {
+    "cs": "Czech", "sk": "Slovak", "de": "German", "fr": "French",
+    "es": "Spanish", "it": "Italian", "pl": "Polish", "hu": "Hungarian",
+}
+
+def _translate_segment_qwen(text: str, target_lang: str, duration: float, model, tokenizer) -> str:
+    """Preloži segment Qwen3 s ohladom na dlzku (target word count)."""
+    # Odhadneme max pocet slov pre target jazyk: ~2.5 slova/sekunda
+    max_words = max(3, int(duration * 2.5))
+    lang_name = LANG_NAMES.get(target_lang, target_lang.upper())
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"You are a professional dubbing translator. "
+                f"Translate the following English text to {lang_name}. "
+                f"The translation MUST fit within {max_words} words maximum "
+                f"because it needs to match a {duration:.1f} second audio slot. "
+                f"Be concise. Preserve meaning. Output ONLY the translation, nothing else. /no_think"
+            )
+        },
+        {"role": "user", "content": text}
+    ]
+
+    input_ids = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
+    ).to(model.device)
+
+    with torch.no_grad():
+        output = model.generate(
+            input_ids,
+            max_new_tokens=128,
+            temperature=0.3,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+
+    response = tokenizer.decode(output[0][input_ids.shape[-1]:], skip_special_tokens=True)
+    # Odstran <think> bloky ak existuju
+    import re
+    response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+    return response
+
+
 def step_translate(segments: list[dict], target_lang: str = "cs") -> list[dict]:
-    pipe = get_qwen()
+    model, tokenizer = get_qwen()
     translated = []
-    batch_size = 50
-    texts = [seg["text"] for seg in segments]
-    for i in range(0, len(texts), batch_size):
-        batch_texts = texts[i:i + batch_size]
-        results = pipe(batch_texts, max_length=512)
-        for j, result in enumerate(results):
-            translated.append({**segments[i + j], "translated": result["translation_text"]})
-        logger.info(f"Translated batch {i//batch_size + 1}/{(len(texts)-1)//batch_size + 1}")
+    for i, seg in enumerate(segments):
+        text = seg.get("text", "").strip()
+        if not text:
+            translated.append({**seg, "translated": ""})
+            continue
+        duration = seg["end"] - seg["start"]
+        try:
+            result = _translate_segment_qwen(text, target_lang, duration, model, tokenizer)
+            translated.append({**seg, "translated": result})
+            logger.info(f"Seg {i}: '{text[:40]}' -> '{result[:40]}' ({duration:.1f}s, max {int(duration*2.5)}w)")
+        except Exception as e:
+            logger.warning(f"Qwen translation failed seg {i}: {e} — fallback Helsinki")
+            try:
+                pipe = get_translator()
+                result = pipe(text, max_length=512)[0]["translation_text"]
+            except Exception:
+                result = text
+            translated.append({**seg, "translated": result})
     logger.info(f"Translated {len(translated)} segments")
     return translated
 
