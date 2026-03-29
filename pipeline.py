@@ -206,7 +206,7 @@ def step_tts_clone(
     segments: list[dict],
     reference_audio_path: str,
     workdir: str,
-    target_lang: str = "sk",
+    target_lang: str = "cs",
 ) -> str:
     """
     XTTS v2 (Coqui TTS) zero-shot voice cloning.
