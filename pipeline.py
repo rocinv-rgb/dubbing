@@ -205,7 +205,10 @@ def step_translate(segments: list[dict], target_lang: str = "sk") -> list[dict]:
             f'Output:'
         )
         response = pipe(
-            [{"role": "user", "content": prompt}],
+            [
+                {"role": "system", "content": "You are a professional translator. Reply with JSON only. No thinking, no explanation."},
+                {"role": "user", "content": prompt},
+            ],
             return_full_text=False,
             temperature=0.3,
             do_sample=True,
