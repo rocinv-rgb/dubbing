@@ -84,6 +84,13 @@ def get_xtts():
     global _xtts_model
     if _xtts_model is None:
         import functools
+        import torchaudio
+        # Nastav torchaudio backend na soundfile — torchcodec nie je nainštalovany
+        try:
+            torchaudio.set_audio_backend("soundfile")
+            logger.info("torchaudio backend: soundfile")
+        except Exception as e:
+            logger.warning(f"torchaudio backend set failed: {e}")
         # PyTorch 2.6+ zmenil default weights_only=True, coz rozbije XTTS checkpoint.
         # Monkey-patch torch.load aby pouzival weights_only=False (XTTS je trusted source).
         _orig_torch_load = torch.load
