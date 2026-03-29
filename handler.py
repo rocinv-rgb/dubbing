@@ -59,16 +59,9 @@ def _is_yt_url(url: str) -> bool:
 def download_video(url: str, dest_path: str, job_id: str) -> str:
     """
     Stiahne video z URL do dest_path.
-    - Lokálna cesta -> shutil.copy
     - YouTube / yt-dlp kompatibilné URL -> yt-dlp (max 1080p MP4)
     - Priame HTTP URL -> requests stream
     """
-    import shutil
-    if not url.startswith("http"):
-        logger.info(f"[{job_id}] Local file copy: {url}")
-        shutil.copy2(url, dest_path)
-        logger.info(f"[{job_id}] Video ready: {os.path.getsize(dest_path) // 1024 // 1024} MB")
-        return dest_path
     if _is_yt_url(url):
         logger.info(f"[{job_id}] yt-dlp download: {url}")
         cmd = [
@@ -181,7 +174,7 @@ def handler(job: dict) -> dict:
         }
 
     source_lang    = job_input.get("source_lang", "en").strip().lower()
-    ref_audio_url  = job_input.get("reference_audio_url", "").strip() or None
+    ref_audio_url  = (job_input.get("reference_audio_url") or "").strip() or None
 
     logger.info(
         f"[{job_id}] {source_lang} -> {target_lang} | "
