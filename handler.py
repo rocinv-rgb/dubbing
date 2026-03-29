@@ -172,7 +172,7 @@ def handler(job: dict) -> dict:
         logger.error(f"[{job_id}] Missing video_url")
         return {"error": "Missing required field: video_url"}
 
-    target_lang = job_input.get("target_lang", "sk").strip().lower()
+    target_lang = job_input.get("target_lang", "cs").strip().lower()
     if target_lang not in SUPPORTED_LANGS:
         logger.error(f"[{job_id}] Unsupported target_lang: {target_lang}")
         return {
