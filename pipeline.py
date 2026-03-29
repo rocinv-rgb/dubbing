@@ -152,7 +152,9 @@ def _parse_translation_json(raw: str, batch_size: int) -> dict[int, str]:
     Zvlada: markdown fences, verbose prefix, multiline JSON.
     [\s\S]* namiesto .*? — spolahlive pre multiline.
     """
-    clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+    # Odstráň <think>...</think> blok (Qwen3 thinking mode)
+    clean = re.sub(r"<think>[\s\S]*?</think>", "", raw, flags=re.IGNORECASE).strip()
+    clean = re.sub(r"```(?:json)?", "", clean).strip().rstrip("`").strip()
     match = re.search(r"(\[[\s\S]*\])", clean)
     if match:
         clean = match.group(1)
