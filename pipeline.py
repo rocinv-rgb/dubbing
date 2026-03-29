@@ -459,7 +459,6 @@ def step_translate(segments: list[dict], target_lang: str = "cs") -> list[dict]:
             trans_len = len(trans)
             if trans_len > orig_len * 1.4:
                 # Skrat na poslednu bodku/otaznik/vyksricnik
-                import re
                 sentences = re.split(r'(?<=[.!?])\s+', trans)
                 if len(sentences) > 1:
                     trans = ' '.join(sentences[:-1])
@@ -610,35 +609,24 @@ def step_mix_final(
 ) -> str:
     orig_srt, cs_srt = step_generate_srt(segments, workdir)
 
-    # Temp video bez titulkov
-    tmp_video = os.path.join(workdir, "dubbed_no_subs.mp4")
+    # Mix audio
     cmd = [
         "ffmpeg", "-y",
         "-i", original_video,
         "-i", dubbed_voice,
         "-i", accompaniment,
+        "-i", orig_srt,
+        "-i", cs_srt,
         "-filter_complex",
         "[1:a]volume=1.0[voice];[2:a]volume=0.5[music];[voice][music]amix=inputs=2:duration=first[aout]",
-        "-map", "0:v", "-map", "[aout]",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-        "-shortest", tmp_video,
+        "-map", "0:v", "-map", "[aout]", "-map", "3:s", "-map", "4:s",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-c:s", "mov_text",
+        "-metadata:s:s:0", "language=eng", "-metadata:s:s:0", "title=Original",
+        "-metadata:s:s:1", "language=ces", "-metadata:s:s:1", "title=Czech",
+        "-shortest", output_path,
     ]
     _ffmpeg(cmd, timeout=600, step="final_mix")
-
-    # Napali titulky — originalne hore (biele), preklad dole (zlte)
-    cmd2 = [
-        "ffmpeg", "-y",
-        "-i", tmp_video,
-        "-vf",
-        (
-            f"subtitles={cs_srt}:force_style='Alignment=2,FontSize=18,PrimaryColour=&H00FFFF00,OutlineColour=&H00000000,Outline=2',"
-            f"subtitles={orig_srt}:force_style='Alignment=8,FontSize=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2'"
-        ),
-        "-c:a", "copy",
-        output_path,
-    ]
-    _ffmpeg(cmd2, timeout=600, step="burn_subtitles")
-    logger.info(f"Final video s titulkami: {output_path}")
+    logger.info(f"Final video so soft titulkami: {output_path}")
     return output_path
 
 
