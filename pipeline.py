@@ -125,7 +125,7 @@ def get_diarize_pipeline():
     global _diarize_pipeline
     if _diarize_pipeline is None:
         from pyannote.audio import Pipeline as PyPipeline
-        token = os.environ.get("HF_API_TOKEN", "")
+        token = os.environ.get("HF_API_TOKEN") or os.environ.get("RUNPOD_SECRET_HF_API_TOKEN", "")
         if not token:
             raise RuntimeError("HF_API_TOKEN env var nie je nastaveny — potrebny pre pyannote diarizaciu")
         logger.info("Loading pyannote speaker-diarization-3.1...")
@@ -170,7 +170,7 @@ def step_diarize(vocals_path: str) -> dict[str, list[tuple[float, float]]]:
     pyannote diarizacia — vrati slovnik {speaker_id: [(start, end), ...]}
     Ak HF_API_TOKEN nie je nastaveny, vrati jedineho default speakera.
     """
-    hf_token = os.environ.get("HF_API_TOKEN", "")
+    hf_token = os.environ.get("HF_API_TOKEN") or os.environ.get("RUNPOD_SECRET_HF_API_TOKEN", "")
     if not hf_token:
         logger.warning("HF_API_TOKEN nie je nastaveny — preskakujem diarizaciu, pouzivam jedineho speakera")
         return {"SPEAKER_00": []}
