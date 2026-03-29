@@ -62,6 +62,13 @@ def download_video(url: str, dest_path: str, job_id: str) -> str:
     - YouTube / yt-dlp kompatibilné URL -> yt-dlp (max 1080p MP4)
     - Priame HTTP URL -> requests stream
     """
+    # Lokálny súbor — priamo použijeme, nekopírujeme
+    if not url.startswith("http://") and not url.startswith("https://"):
+        if not os.path.exists(url) or os.path.getsize(url) == 0:
+            raise RuntimeError(f"Local video file missing or empty: {url}")
+        logger.info(f"[{job_id}] Using local file: {url} ({os.path.getsize(url) // 1024 // 1024} MB)")
+        return url
+
     if _is_yt_url(url):
         logger.info(f"[{job_id}] yt-dlp download: {url}")
         cmd = [
