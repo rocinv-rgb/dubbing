@@ -490,13 +490,46 @@ def step_tts_clone(
     return out_path
 
 
+def step_generate_srt(segments: list[dict], workdir: str) -> tuple[str, str]:
+    """Vygeneruje SRT titulky — originalne aj prelozene."""
+    def fmt_time(t: float) -> str:
+        h = int(t // 3600)
+        m = int((t % 3600) // 60)
+        s = int(t % 60)
+        ms = int((t % 1) * 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    orig_srt = os.path.join(workdir, "subtitles_orig.srt")
+    cs_srt   = os.path.join(workdir, "subtitles_cs.srt")
+
+    with open(orig_srt, "w", encoding="utf-8") as fo, \
+         open(cs_srt,  "w", encoding="utf-8") as fc:
+        for i, seg in enumerate(segments, 1):
+            start = fmt_time(seg["start"])
+            end   = fmt_time(seg["end"])
+            orig_text = seg.get("text", "").strip()
+            cs_text   = seg.get("translated", "").strip()
+            if orig_text:
+                fo.write(f"{i}\n{start} --> {end}\n{orig_text}\n\n")
+            if cs_text:
+                fc.write(f"{i}\n{start} --> {end}\n{cs_text}\n\n")
+
+    logger.info(f"SRT vygenerovane: {orig_srt}, {cs_srt}")
+    return orig_srt, cs_srt
+
+
 def step_mix_final(
     original_video: str,
     dubbed_voice: str,
     accompaniment: str,
+    segments: list[dict],
     workdir: str,
     output_path: str,
 ) -> str:
+    orig_srt, cs_srt = step_generate_srt(segments, workdir)
+
+    # Temp video bez titulkov
+    tmp_video = os.path.join(workdir, "dubbed_no_subs.mp4")
     cmd = [
         "ffmpeg", "-y",
         "-i", original_video,
@@ -506,10 +539,24 @@ def step_mix_final(
         "[1:a]volume=1.0[voice];[2:a]volume=0.5[music];[voice][music]amix=inputs=2:duration=first[aout]",
         "-map", "0:v", "-map", "[aout]",
         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-        "-shortest", output_path,
+        "-shortest", tmp_video,
     ]
     _ffmpeg(cmd, timeout=600, step="final_mix")
-    logger.info(f"Final video: {output_path}")
+
+    # Napali titulky — originalne hore (biele), preklad dole (zlte)
+    cmd2 = [
+        "ffmpeg", "-y",
+        "-i", tmp_video,
+        "-vf",
+        (
+            f"subtitles={cs_srt}:force_style='Alignment=2,FontSize=18,PrimaryColour=&H00FFFF00,OutlineColour=&H00000000,Outline=2',"
+            f"subtitles={orig_srt}:force_style='Alignment=8,FontSize=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2'"
+        ),
+        "-c:a", "copy",
+        output_path,
+    ]
+    _ffmpeg(cmd2, timeout=600, step="burn_subtitles")
+    logger.info(f"Final video s titulkami: {output_path}")
     return output_path
 
 
@@ -596,8 +643,8 @@ def run_dubbing_pipeline(
             dubbed_voice = str(dubbed_voice_cache)
             logger.info(f"Dubbed voice cached: {dubbed_voice_cache}")
 
-        # 8. Finalny mix
-        step_mix_final(video_path, dubbed_voice, accompaniment, workdir, output_path)
+        # 8. Finalny mix + titulky
+        step_mix_final(video_path, dubbed_voice, accompaniment, segments, workdir, output_path)
 
         total_seconds = segments[-1]["end"] if segments else 0
         speakers_found = list(set(seg.get("speaker", "SPEAKER_00") for seg in segments))
