@@ -467,6 +467,29 @@ def step_tts_clone(
                 audio_data = audio_data.mean(axis=1)
             if len(audio_data) == 0:
                 raise RuntimeError("TTS returned zero-length audio")
+
+            # Time-stretching: natiahnuť/skrátiť TTS na presnu dlzku segmentu
+            target_dur = seg["end"] - seg["start"]
+            actual_dur = len(audio_data) / tts_sample_rate
+            if target_dur > 0.1 and actual_dur > 0.1:
+                ratio = actual_dur / target_dur
+                # atempo akceptuje 0.5-2.0, pre väčšie hodnoty chainujeme
+                if 0.4 < ratio < 2.5:
+                    stretched_out = os.path.join(workdir, f"seg_{i:04d}_stretched.wav")
+                    if ratio <= 2.0:
+                        atempo = f"atempo={ratio:.4f}"
+                    else:
+                        # chain: 2x atempo pre ratio > 2.0
+                        r1 = min(ratio / 2.0, 2.0) if ratio > 2.0 else ratio
+                        atempo = f"atempo={min(2.0, ratio/2):.4f},atempo={min(2.0, ratio/max(ratio/2,1)):.4f}"
+                    stretch_cmd = ["ffmpeg", "-y", "-i", tmp_out, "-af", atempo, stretched_out]
+                    result = subprocess.run(stretch_cmd, capture_output=True, timeout=30)
+                    if result.returncode == 0 and os.path.exists(stretched_out):
+                        audio_data, sr = sf.read(stretched_out, dtype="float32")
+                        if audio_data.ndim > 1:
+                            audio_data = audio_data.mean(axis=1)
+                        logger.info(f"Seg {i}: stretched {actual_dur:.2f}s -> {len(audio_data)/tts_sample_rate:.2f}s (target {target_dur:.2f}s)")
+
             peak = np.abs(audio_data).max()
             if peak > 0:
                 audio_data = audio_data / peak * 0.9
