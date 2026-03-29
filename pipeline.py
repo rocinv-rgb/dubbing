@@ -202,19 +202,22 @@ print('|'.join(out))
         p = p.strip()
         if not p:
             continue
-        pl = p.lower()
+        # Ak nie je absolutna cesta, pridaj workdir
+        if not os.path.isabs(p):
+            p = os.path.join(workdir, p)
+        pl = os.path.basename(p).lower()
         if 'instrumental' in pl or 'accomp' in pl or 'no_vocals' in pl:
             accomp_path = p
         else:
             vocals_path = p
 
     if not vocals_path or not os.path.exists(vocals_path):
-        logger.warning("Separator: vocals subor nenajdeny — fallback")
+        logger.warning(f"Separator: vocals subor nenajdeny ({vocals_path}) — fallback")
         shutil.copy(audio_path, vocals_out)
         return vocals_out, audio_path
 
     if not accomp_path or not os.path.exists(accomp_path):
-        logger.warning("Separator: accompaniment subor nenajdeny — pouzivam povodne audio")
+        logger.warning(f"Separator: accompaniment subor nenajdeny ({accomp_path}) — pouzivam povodne audio")
         accomp_path = audio_path
 
     # Resample vocals na 16k mono pre Whisper/pyannote
