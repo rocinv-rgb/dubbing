@@ -438,16 +438,18 @@ def step_tts_clone(
             logger.warning(f"Speaker {speaker}: ref audio prilis kratke ({ref_duration:.1f}s)")
 
     all_audio_chunks: list[np.ndarray] = []
-    prev_end = 0.0
+    current_pos = 0.0  # aktualna pozicia v case (sekundy)
 
     for i, seg in enumerate(segments):
         text = _normalize_text(seg.get("translated", seg.get("text", "")), lang=target_lang)
         if not text:
             continue
 
-        gap = seg["start"] - prev_end
+        # Pridaj ticho len ak sme pred zaciatkom segmentu
+        gap = seg["start"] - current_pos
         if gap > 0.05:
             all_audio_chunks.append(np.zeros(int(gap * tts_sample_rate), dtype=np.float32))
+            current_pos = seg["start"]
 
         speaker = seg.get("speaker", "SPEAKER_00")
         ref_path = speaker_refs.get(speaker, list(speaker_refs.values())[0])
@@ -468,40 +470,20 @@ def step_tts_clone(
             if len(audio_data) == 0:
                 raise RuntimeError("TTS returned zero-length audio")
 
-            # Time-stretching: len spomalenie (nie zrýchlenie) — ak je TTS kratší ako segment, nechaj ticho
-            # Ak je TTS dlhší max o 30%, spomal; ak je viac, orezať (nechaj pretiecť do medzery)
-            target_dur = seg["end"] - seg["start"]
             actual_dur = len(audio_data) / tts_sample_rate
-            if target_dur > 0.1 and actual_dur > 0.1:
-                ratio = actual_dur / target_dur  # >1 = TTS je dlhší ako slot
-                # Spomaľ len ak je TTS kratší ako slot (ratio < 1.0) — max spomalenie 0.75x
-                if 0.75 <= ratio < 1.0:
-                    stretched_out = os.path.join(workdir, f"seg_{i:04d}_stretched.wav")
-                    stretch_cmd = ["ffmpeg", "-y", "-i", tmp_out, "-af", f"atempo={ratio:.4f}", stretched_out]
-                    result = subprocess.run(stretch_cmd, capture_output=True, timeout=30)
-                    if result.returncode == 0 and os.path.exists(stretched_out):
-                        audio_data, sr = sf.read(stretched_out, dtype="float32")
-                        if audio_data.ndim > 1:
-                            audio_data = audio_data.mean(axis=1)
-                        logger.info(f"Seg {i}: slowed {actual_dur:.2f}s -> {len(audio_data)/tts_sample_rate:.2f}s (target {target_dur:.2f}s)")
-                elif ratio > 1.0:
-                    # TTS je dlhší — orezať na target + 20% tolerancia
-                    max_samples = int(target_dur * 1.2 * tts_sample_rate)
-                    if len(audio_data) > max_samples:
-                        audio_data = audio_data[:max_samples]
-                        logger.info(f"Seg {i}: trimmed {actual_dur:.2f}s -> {len(audio_data)/tts_sample_rate:.2f}s (target {target_dur:.2f}s)")
+            logger.info(f"Seg {i} TTS: {actual_dur:.2f}s (slot {seg['end']-seg['start']:.2f}s)")
 
             peak = np.abs(audio_data).max()
             if peak > 0:
                 audio_data = audio_data / peak * 0.9
             all_audio_chunks.append(audio_data)
-            logger.info(f"Seg {i} [{speaker}]: '{text[:40]}' -> {len(audio_data)/tts_sample_rate:.2f}s")
+            current_pos += len(audio_data) / tts_sample_rate
+            logger.info(f"Seg {i} [{speaker}]: '{text[:40]}' -> {len(audio_data)/tts_sample_rate:.2f}s (pos={current_pos:.2f}s)")
         except Exception as e:
             logger.warning(f"TTS failed seg {i} [{speaker}] '{text[:50]}': {type(e).__name__}: {e}", exc_info=True)
             dur = seg["end"] - seg["start"]
             all_audio_chunks.append(np.zeros(int(dur * tts_sample_rate), dtype=np.float32))
-
-        prev_end = seg["end"]
+            current_pos = seg["end"]
 
     final_audio = (
         np.concatenate(all_audio_chunks)
