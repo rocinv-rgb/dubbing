@@ -296,11 +296,19 @@ def step_tts_clone(
     if ref_duration < 3.0:
         logger.warning(f"Reference audio too short ({ref_duration:.1f}s < 3s) — voice cloning may be poor")
 
+    def _normalize_text(t: str) -> str:
+        """Normalizuj text pre TTS — odstran problematicke znaky a cisla s medzerami."""
+        # Čísla s medzerou ako oddeľovač tisícov: "1 700" -> "1700"
+        t = re.sub(r'(\d)\s(\d{3})\b', r'\1\2', t)
+        # Viacnásobné medzery
+        t = re.sub(r'  +', ' ', t)
+        return t.strip()
+
     all_audio_chunks: list[np.ndarray] = []
     prev_end = 0.0
 
     for i, seg in enumerate(segments):
-        text = seg.get("translated", seg.get("text", "")).strip()
+        text = _normalize_text(seg.get("translated", seg.get("text", "")))
         if not text:
             continue
 
@@ -323,14 +331,13 @@ def step_tts_clone(
                 audio_data = audio_data.mean(axis=1)
             if len(audio_data) == 0:
                 raise RuntimeError("TTS returned zero-length audio")
-            # Normalize to avoid clipping / silence from near-zero output
             peak = np.abs(audio_data).max()
             if peak > 0:
                 audio_data = audio_data / peak * 0.9
             all_audio_chunks.append(audio_data)
             logger.info(f"Segment {i}: '{text[:50]}' -> {len(audio_data)/tts_sample_rate:.2f}s (peak={peak:.3f})")
         except Exception as e:
-            logger.warning(f"TTS failed for segment {i} '{text[:60]}': {e}")
+            logger.warning(f"TTS failed for segment {i} '{text[:60]}': {type(e).__name__}: {e}", exc_info=True)
             dur = seg["end"] - seg["start"]
             all_audio_chunks.append(np.zeros(int(dur * tts_sample_rate), dtype=np.float32))
 
