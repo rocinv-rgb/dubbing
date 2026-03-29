@@ -201,7 +201,7 @@ def handler(job: dict) -> dict:
                 ref_audio_path = os.path.join(workdir, "reference.wav")
                 download_file(ref_audio_url, ref_audio_path, job_id)
 
-            output_path = os.path.join(workdir, "output_dubbed.mp4")
+            output_path = f"/workspace/output_{job_id}.mp4"
 
             # Pipeline
             logger.info(f"[{job_id}] Starting pipeline...")
