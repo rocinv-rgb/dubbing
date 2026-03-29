@@ -1,13 +1,14 @@
 """
 pipeline.py - AI Dubbing Pipeline
-Kroky: FFmpeg -> Whisper -> Qwen3-14B (preklad) -> XTTS v2 (TTS+klonovanie) -> FFmpeg mix
+Kroky: FFmpeg -> Whisper -> Helsinki-NLP preklad -> pyannote diarizacia -> XTTS v2 (per-speaker voice cloning) -> FFmpeg mix
 
-Verzia 1.2:
-- Demucs odstraneny (padal na nvcc) — pouziva cele audio
-- CosyVoice2 nahradeny za Coqui XTTS v2 (nevyzaduje nvcc/deepspeed)
-- Oprava: source_lang="auto" -> None pre Whisper API
-- Oprava: _xtts_model global (bolo _cosyvoice_model)
-- Oprava: cache adresare presunute na /workspace (perzistentny Volume), nie do docasneho workdir
+Verzia 1.3:
+- Pridana pyannote speaker diarization (rozlisenie hlasov)
+- Kazdy speaker dostane vlastny ref_audio a vlastny XTTS hlas
+- COQUI_TTS_HOME -> /workspace/models (perzistentny)
+- torchaudio.load monkey-patch -> soundfile (torchcodec workaround)
+- torch.load weights_only=False pre XTTS (PyTorch 2.6 compat)
+- Text normalizacia pre TTS (cisla s medzerami atd.)
 """
 
 import os
@@ -19,7 +20,7 @@ import tempfile
 import logging
 from pathlib import Path
 
-# Presmeruj Coqui TTS cache na perzistentny Volume — model sa nestiahne pri kazdom reštarte podu
+# Presmeruj Coqui TTS cache na perzistentny Volume
 os.environ.setdefault("COQUI_TTS_HOME", "/workspace/models")
 
 # torchaudio 2.11+ odstranilo set_audio_backend(), defaultuje na torchcodec (nie je nainštalovany).
@@ -27,21 +28,20 @@ os.environ.setdefault("COQUI_TTS_HOME", "/workspace/models")
 def _patch_torchaudio_load():
     try:
         import torchaudio
-        import soundfile as sf
+        import soundfile as _sf
         if getattr(torchaudio, "_cml_patched", False):
             return
         _orig = torchaudio.load
         def _sf_load(path, frame_offset=0, num_frames=-1, normalize=True,
                      channels_first=True, format=None, backend=None, **kw):
             try:
-                data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+                data, sr = _sf.read(str(path), dtype="float32", always_2d=True)
                 if num_frames > 0:
                     data = data[frame_offset:frame_offset + num_frames]
                 elif frame_offset > 0:
                     data = data[frame_offset:]
                 import torch as _t
-                tensor = _t.from_numpy(data.T if channels_first else data)
-                return tensor, sr
+                return _t.from_numpy(data.T if channels_first else data), sr
             except Exception:
                 return _orig(path, frame_offset=frame_offset, num_frames=num_frames,
                              normalize=normalize, channels_first=channels_first)
@@ -56,31 +56,26 @@ import torch
 import soundfile as sf
 import numpy as np
 
-
-def _ffmpeg(cmd: list[str], timeout: int = 120, step: str = "ffmpeg") -> None:
-    """Spusti FFmpeg s timeoutom. Pri chybe vypise stderr pre debugovanie."""
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            f"FFmpeg timeout ({timeout}s) in step '{step}'. "
-            "Video moze byt poskodene alebo je pod pretazeny."
-        )
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr.decode("utf-8", errors="replace").strip()[-500:]
-        raise RuntimeError(f"FFmpeg failed in step '{step}': {stderr}")
-
-
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/workspace/models"))
-CACHE_DIR = Path(os.environ.get("CACHE_DIR", "/workspace/cache"))
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+CACHE_DIR  = Path(os.environ.get("CACHE_DIR",  "/workspace/cache"))
+DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Lazy-loaded globals (nacitaju sa raz pri prvom jobu = warm start)
-_whisper_model = None
-_qwen_pipe = None
-_xtts_model = None
+_whisper_model   = None
+_qwen_pipe       = None
+_xtts_model      = None
+_diarize_pipeline = None
+
+
+def _ffmpeg(cmd: list[str], timeout: int = 120, step: str = "ffmpeg") -> None:
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"FFmpeg timeout ({timeout}s) in step '{step}'.")
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode("utf-8", errors="replace").strip()[-500:]
+        raise RuntimeError(f"FFmpeg failed in step '{step}': {stderr}")
 
 
 def get_whisper():
@@ -89,8 +84,7 @@ def get_whisper():
         import whisper
         logger.info("Loading Whisper large-v3...")
         _whisper_model = whisper.load_model(
-            "large-v3",
-            device=DEVICE,
+            "large-v3", device=DEVICE,
             download_root=str(MODEL_DIR / "whisper"),
         )
     return _whisper_model
@@ -109,48 +103,10 @@ def get_qwen():
     return _qwen_pipe
 
 
-def _patch_torchaudio():
-    """
-    torchaudio 2.11+ odstranilo set_audio_backend() a defaultuje na torchcodec
-    ktory nie je nainštalovany. Monkey-patch torchaudio.load -> soundfile.
-    """
-    import torchaudio
-    import soundfile as sf
-
-    if getattr(torchaudio, "_cml_patched", False):
-        return  # uz opatchovane
-
-    _orig_load = torchaudio.load
-
-    def _sf_load(path, frame_offset=0, num_frames=-1, normalize=True,
-                 channels_first=True, format=None, backend=None):
-        try:
-            data, sr = sf.read(str(path), dtype="float32", always_2d=True)
-            if num_frames > 0:
-                data = data[frame_offset:frame_offset + num_frames]
-            elif frame_offset > 0:
-                data = data[frame_offset:]
-            tensor = torch.from_numpy(data.T if channels_first else data)
-            return tensor, sr
-        except Exception:
-            # fallback na povodny loader ak soundfile zlyha
-            return _orig_load(path, frame_offset=frame_offset,
-                              num_frames=num_frames, normalize=normalize,
-                              channels_first=channels_first)
-
-    torchaudio.load = _sf_load
-    torchaudio._cml_patched = True
-    logger.info("torchaudio.load patched -> soundfile (torchcodec workaround)")
-
-
 def get_xtts():
-    """Lazy-load XTTS v2 (Coqui TTS). Nevyzaduje nvcc ani deepspeed."""
     global _xtts_model
     if _xtts_model is None:
         import functools
-        _patch_torchaudio()
-        # PyTorch 2.6+ zmenil default weights_only=True, coz rozbije XTTS checkpoint.
-        # Monkey-patch torch.load aby pouzival weights_only=False (XTTS je trusted source).
         _orig_torch_load = torch.load
         torch.load = functools.partial(_orig_torch_load, weights_only=False)
         try:
@@ -161,124 +117,215 @@ def get_xtts():
             _xtts_model = tts
             logger.info("XTTS v2 loaded.")
         finally:
-            torch.load = _orig_torch_load  # vrat povodny torch.load
+            torch.load = _orig_torch_load
     return _xtts_model
+
+
+def get_diarize_pipeline():
+    global _diarize_pipeline
+    if _diarize_pipeline is None:
+        from pyannote.audio import Pipeline as PyPipeline
+        token = os.environ.get("HF_API_TOKEN", "")
+        if not token:
+            raise RuntimeError("HF_API_TOKEN env var nie je nastaveny — potrebny pre pyannote diarizaciu")
+        logger.info("Loading pyannote speaker-diarization-3.1...")
+        _diarize_pipeline = PyPipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1", token=token
+        )
+        _diarize_pipeline.to(torch.device(DEVICE))
+        logger.info("Diarization pipeline loaded.")
+    return _diarize_pipeline
 
 
 # --- Pipeline kroky ---
 
 def step_extract_audio(video_path: str, workdir: str) -> str:
-    """FFmpeg: extrahuje audio z videa ako WAV 16kHz mono."""
     out = os.path.join(workdir, "audio_raw.wav")
-    _ffmpeg(
-        ["ffmpeg", "-y", "-i", video_path, "-ar", "16000", "-ac", "1", "-vn", out],
-        timeout=120, step="extract_audio"
-    )
-    logger.info(f"Audio extracted: {out}")
+    _ffmpeg(["ffmpeg", "-y", "-i", video_path, "-ar", "16000", "-ac", "1", "-vn", out],
+            timeout=120, step="extract_audio")
     return out
 
 
 def step_prepare_audio(audio_path: str, workdir: str) -> tuple[str, str]:
-    """
-    Bez Demucs separacie — pouziva cele audio pre Whisper aj ako sprievod.
-    Vracia (vocals_path, accompaniment_path).
-    """
     vocals_16k = os.path.join(workdir, "vocals_16k.wav")
-    _ffmpeg(
-        ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", vocals_16k],
-        timeout=120, step="resample_vocals"
-    )
-    logger.info(f"Audio prepared — vocals={vocals_16k}, accompaniment={audio_path}")
+    _ffmpeg(["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", vocals_16k],
+            timeout=120, step="resample_vocals")
     return vocals_16k, audio_path
 
 
 def step_transcribe(vocals_path: str, source_lang: str | None = None) -> list[dict]:
-    """
-    Whisper large-v3: transkripcia s timestampmi.
-    source_lang=None -> auto-detect jazyka (spanielcina, cistina, arabcina...).
-    POZOR: Whisper ocakava None pre auto-detect, nie retazec "auto".
-    """
     model = get_whisper()
-    # Normalizacia: "auto" alebo prazdny retazec -> None
     if source_lang and source_lang.lower() in ("auto", ""):
         source_lang = None
-
     logger.info(f"Transcribing... (language={source_lang or 'auto-detect'})")
-    result = model.transcribe(
-        vocals_path,
-        language=source_lang,
-        word_timestamps=True,
-        verbose=False,
-    )
-    segments = [
-        {"start": s["start"], "end": s["end"], "text": s["text"].strip()}
-        for s in result["segments"]
-    ]
+    result = model.transcribe(vocals_path, language=source_lang, word_timestamps=True, verbose=False)
+    segments = [{"start": s["start"], "end": s["end"], "text": s["text"].strip()}
+                for s in result["segments"]]
     logger.info(f"Transcribed {len(segments)} segments")
     return segments
 
 
-def _parse_translation_json(raw: str, batch_size: int) -> dict[int, str]:
+def step_diarize(vocals_path: str) -> dict[str, list[tuple[float, float]]]:
     """
-    Robustny parser pre JSON vystup z Qwen3.
-    Zvlada: markdown fences, verbose prefix, multiline JSON.
-    [\s\S]* namiesto .*? — spolahlive pre multiline.
+    pyannote diarizacia — vrati slovnik {speaker_id: [(start, end), ...]}
+    Ak HF_API_TOKEN nie je nastaveny, vrati jedineho default speakera.
     """
-    # Odstráň <think>...</think> blok (Qwen3 thinking mode)
-    clean = re.sub(r"<think>[\s\S]*?</think>", "", raw, flags=re.IGNORECASE).strip()
-    clean = re.sub(r"```(?:json)?", "", clean).strip().rstrip("`").strip()
-    match = re.search(r"(\[[\s\S]*\])", clean)
-    if match:
-        clean = match.group(1)
+    hf_token = os.environ.get("HF_API_TOKEN", "")
+    if not hf_token:
+        logger.warning("HF_API_TOKEN nie je nastaveny — preskakujem diarizaciu, pouzivam jedineho speakera")
+        return {"SPEAKER_00": []}
 
     try:
-        data = json.loads(clean)
-        if isinstance(data, list):
-            return {
-                item["id"]: item["text"]
-                for item in data
-                if isinstance(item, dict) and "id" in item and "text" in item
-            }
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.warning(f"Translation JSON parse failed: {e} | raw[:300]={raw[:300]}")
+        pipeline = get_diarize_pipeline()
+        data, sr = sf.read(vocals_path, dtype="float32", always_2d=True)
+        audio = {"waveform": torch.from_numpy(data.T), "sample_rate": sr}
+        result = pipeline(audio)
+        sd = result.speaker_diarization
 
-    return {}
+        speakers: dict[str, list[tuple[float, float]]] = {}
+        for turn, _, speaker in sd.itertracks(yield_label=True):
+            speakers.setdefault(speaker, []).append((turn.start, turn.end))
+
+        logger.info(f"Diarization: {len(speakers)} speaker(s) — {list(speakers.keys())}")
+        return speakers
+    except Exception as e:
+        logger.warning(f"Diarizacia zlyhala: {e} — pouzivam jedineho speakera")
+        return {"SPEAKER_00": []}
+
+
+def step_assign_speakers(segments: list[dict], speaker_turns: dict[str, list[tuple[float, float]]]) -> list[dict]:
+    """
+    Prirad kazdenmu segmentu speaker_id podla prekryvu s diarizacnymi segmentmi.
+    Ak nie su k dispozicii diarizacne data, vsetky segmenty dostanu SPEAKER_00.
+    """
+    if not any(turns for turns in speaker_turns.values()):
+        for seg in segments:
+            seg["speaker"] = "SPEAKER_00"
+        return segments
+
+    for seg in segments:
+        mid = (seg["start"] + seg["end"]) / 2
+        best_speaker = "SPEAKER_00"
+        best_overlap = 0.0
+        for speaker, turns in speaker_turns.items():
+            for (s, e) in turns:
+                overlap = min(seg["end"], e) - max(seg["start"], s)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_speaker = speaker
+        seg["speaker"] = best_speaker
+
+    speaker_counts = {}
+    for seg in segments:
+        speaker_counts[seg["speaker"]] = speaker_counts.get(seg["speaker"], 0) + 1
+    logger.info(f"Speaker assignment: {speaker_counts}")
+    return segments
+
+
+def step_extract_speaker_refs(
+    segments: list[dict],
+    vocals_path: str,
+    workdir: str,
+    min_duration: float = 5.0,
+    max_duration: float = 15.0,
+) -> dict[str, str]:
+    """
+    Pre kazdeho speakera extrahuj ref audio z jeho najdlhsich segmentov.
+    Vracia {speaker_id: path_to_ref_wav}.
+    """
+    from collections import defaultdict
+    speaker_segs = defaultdict(list)
+    for seg in segments:
+        speaker_segs[seg["speaker"]].append(seg)
+
+    refs = {}
+    for speaker, segs in speaker_segs.items():
+        # Zorad podla dlzky (najdlhsie prve)
+        segs_sorted = sorted(segs, key=lambda s: s["end"] - s["start"], reverse=True)
+
+        # Zbieraj segmenty kym nemame aspon min_duration sekund
+        collected = []
+        total = 0.0
+        for s in segs_sorted:
+            dur = s["end"] - s["start"]
+            if dur < 1.0:
+                continue
+            collected.append(s)
+            total += dur
+            if total >= max_duration:
+                break
+
+        if total < 1.0:
+            logger.warning(f"Speaker {speaker}: prilis malo audia ({total:.1f}s) — pouzivam cely vocals")
+            refs[speaker] = vocals_path
+            continue
+
+        # Extrahuj a spoj audio segmenty pomocou FFmpeg
+        ref_path = os.path.join(workdir, f"ref_{speaker}.wav")
+        if len(collected) == 1:
+            s = collected[0]
+            _ffmpeg([
+                "ffmpeg", "-y", "-i", vocals_path,
+                "-ss", str(s["start"]), "-to", str(s["end"]),
+                "-ar", "22050", "-ac", "1", ref_path,
+            ], timeout=30, step=f"ref_extract_{speaker}")
+        else:
+            # Viac segmentov — concat cez FFmpeg filter
+            parts = []
+            for idx, s in enumerate(collected):
+                part = os.path.join(workdir, f"ref_{speaker}_part{idx}.wav")
+                _ffmpeg([
+                    "ffmpeg", "-y", "-i", vocals_path,
+                    "-ss", str(s["start"]), "-to", str(s["end"]),
+                    "-ar", "22050", "-ac", "1", part,
+                ], timeout=30, step=f"ref_part_{speaker}_{idx}")
+                parts.append(part)
+
+            # Concat list file
+            list_file = os.path.join(workdir, f"ref_{speaker}_list.txt")
+            with open(list_file, "w") as f:
+                for p in parts:
+                    f.write(f"file '{p}'\n")
+            _ffmpeg([
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", list_file, "-ar", "22050", "-ac", "1", ref_path,
+            ], timeout=60, step=f"ref_concat_{speaker}")
+
+        logger.info(f"Speaker {speaker}: ref audio {total:.1f}s -> {ref_path}")
+        refs[speaker] = ref_path
+
+    return refs
 
 
 def step_translate(segments: list[dict], target_lang: str = "cs") -> list[dict]:
-    """
-    Helsinki-NLP opus-mt: rýchly preklad bez thinking mode.
-    Batch po 50, priamy translation pipeline.
-    """
     pipe = get_qwen()
     translated = []
-
     batch_size = 50
     texts = [seg["text"] for seg in segments]
-
     for i in range(0, len(texts), batch_size):
         batch_texts = texts[i:i + batch_size]
         results = pipe(batch_texts, max_length=512)
         for j, result in enumerate(results):
-            translated.append({
-                **segments[i + j],
-                "translated": result["translation_text"],
-            })
+            translated.append({**segments[i + j], "translated": result["translation_text"]})
         logger.info(f"Translated batch {i//batch_size + 1}/{(len(texts)-1)//batch_size + 1}")
-
     logger.info(f"Translated {len(translated)} segments")
     return translated
 
 
+def _normalize_text(t: str) -> str:
+    t = re.sub(r'(\d)\s(\d{3})\b', r'\1\2', t)
+    t = re.sub(r'  +', ' ', t)
+    return t.strip()
+
+
 def step_tts_clone(
     segments: list[dict],
-    reference_audio_path: str,
+    speaker_refs: dict[str, str],
     workdir: str,
     target_lang: str = "cs",
 ) -> str:
     """
-    XTTS v2 (Coqui TTS) zero-shot voice cloning.
-    Sample rate vystupu: 24000 Hz.
+    XTTS v2 voice cloning — kazdy speaker ma vlastny ref audio.
     """
     XTTS_LANG_MAP = {
         "sk": "sk", "cs": "cs", "de": "de", "fr": "fr",
@@ -289,20 +336,13 @@ def step_tts_clone(
     model = get_xtts()
     tts_sample_rate = 24000
 
-    # Validate reference audio — XTTS needs at least 3s of clean audio
-    ref_data, ref_sr = sf.read(reference_audio_path, dtype="float32")
-    ref_duration = len(ref_data) / ref_sr
-    logger.info(f"Reference audio: {ref_duration:.1f}s @ {ref_sr}Hz")
-    if ref_duration < 3.0:
-        logger.warning(f"Reference audio too short ({ref_duration:.1f}s < 3s) — voice cloning may be poor")
-
-    def _normalize_text(t: str) -> str:
-        """Normalizuj text pre TTS — odstran problematicke znaky a cisla s medzerami."""
-        # Čísla s medzerou ako oddeľovač tisícov: "1 700" -> "1700"
-        t = re.sub(r'(\d)\s(\d{3})\b', r'\1\2', t)
-        # Viacnásobné medzery
-        t = re.sub(r'  +', ' ', t)
-        return t.strip()
+    # Validuj ref audio pre kazdeho speakera
+    for speaker, ref_path in speaker_refs.items():
+        ref_data, ref_sr = sf.read(ref_path, dtype="float32")
+        ref_duration = len(ref_data) / ref_sr
+        logger.info(f"Speaker {speaker} ref: {ref_duration:.1f}s @ {ref_sr}Hz")
+        if ref_duration < 3.0:
+            logger.warning(f"Speaker {speaker}: ref audio prilis kratke ({ref_duration:.1f}s)")
 
     all_audio_chunks: list[np.ndarray] = []
     prev_end = 0.0
@@ -316,11 +356,14 @@ def step_tts_clone(
         if gap > 0.05:
             all_audio_chunks.append(np.zeros(int(gap * tts_sample_rate), dtype=np.float32))
 
+        speaker = seg.get("speaker", "SPEAKER_00")
+        ref_path = speaker_refs.get(speaker, list(speaker_refs.values())[0])
+
         try:
             tmp_out = os.path.join(workdir, f"seg_{i:04d}.wav")
             model.tts_to_file(
                 text=text,
-                speaker_wav=reference_audio_path,
+                speaker_wav=ref_path,
                 language=xtts_lang,
                 file_path=tmp_out,
             )
@@ -335,9 +378,9 @@ def step_tts_clone(
             if peak > 0:
                 audio_data = audio_data / peak * 0.9
             all_audio_chunks.append(audio_data)
-            logger.info(f"Segment {i}: '{text[:50]}' -> {len(audio_data)/tts_sample_rate:.2f}s (peak={peak:.3f})")
+            logger.info(f"Seg {i} [{speaker}]: '{text[:40]}' -> {len(audio_data)/tts_sample_rate:.2f}s")
         except Exception as e:
-            logger.warning(f"TTS failed for segment {i} '{text[:60]}': {type(e).__name__}: {e}", exc_info=True)
+            logger.warning(f"TTS failed seg {i} [{speaker}] '{text[:50]}': {type(e).__name__}: {e}", exc_info=True)
             dur = seg["end"] - seg["start"]
             all_audio_chunks.append(np.zeros(int(dur * tts_sample_rate), dtype=np.float32))
 
@@ -361,9 +404,6 @@ def step_mix_final(
     workdir: str,
     output_path: str,
 ) -> str:
-    """
-    FFmpeg: zmiesaj novy hlas (0dB) + sprievod (0.7x) + zachovaj video.
-    """
     cmd = [
         "ffmpeg", "-y",
         "-i", original_video,
@@ -371,12 +411,9 @@ def step_mix_final(
         "-i", accompaniment,
         "-filter_complex",
         "[1:a]volume=1.0[voice];[2:a]volume=0.7[music];[voice][music]amix=inputs=2:duration=first[aout]",
-        "-map", "0:v",
-        "-map", "[aout]",
-        "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
-        output_path,
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        "-shortest", output_path,
     ]
     _ffmpeg(cmd, timeout=600, step="final_mix")
     logger.info(f"Final video: {output_path}")
@@ -394,11 +431,9 @@ def run_dubbing_pipeline(
     job_id: str = "local",
 ) -> dict:
     """
-    Spusti cely pipeline.
-    Cache (transcription, translation, dubbed_voice) sa uklada do CACHE_DIR/<job_id>/
-    na perzistentnom Volume — prezije restart podu.
+    Spusti cely pipeline s per-speaker voice cloning.
+    Cache sa uklada do CACHE_DIR/<job_id>/ na perzistentnom Volume.
     """
-    # Cache adresár na Volume (perzistentny), nie v docasnom workdir
     job_cache = CACHE_DIR / job_id
     job_cache.mkdir(parents=True, exist_ok=True)
 
@@ -410,11 +445,8 @@ def run_dubbing_pipeline(
         # 1. Extrakcia audia
         raw_audio = step_extract_audio(video_path, workdir)
 
-        # 2. Priprava audia (bez Demucs)
+        # 2. Priprava audia
         vocals, accompaniment = step_prepare_audio(raw_audio, workdir)
-
-        # Referencia pre klonovanie
-        ref_audio = reference_audio_path or vocals
 
         # 3. Transkripcia (cache)
         if transcription_cache.exists():
@@ -422,9 +454,7 @@ def run_dubbing_pipeline(
             segments = json.loads(transcription_cache.read_text())
         else:
             segments = step_transcribe(vocals, source_lang)
-            transcription_cache.write_text(
-                json.dumps(segments, ensure_ascii=False, indent=2)
-            )
+            transcription_cache.write_text(json.dumps(segments, ensure_ascii=False, indent=2))
             logger.info(f"Transcription cached: {transcription_cache}")
 
         # 4. Preklad (cache)
@@ -433,28 +463,55 @@ def run_dubbing_pipeline(
             segments = json.loads(translation_cache.read_text())
         else:
             segments = step_translate(segments, target_lang)
-            translation_cache.write_text(
-                json.dumps(segments, ensure_ascii=False, indent=2)
-            )
+            translation_cache.write_text(json.dumps(segments, ensure_ascii=False, indent=2))
             logger.info(f"Translation cached: {translation_cache}")
 
-        # 5. TTS (cache)
+        # 5. Diarizacia + priradenie speakerov
+        diarization_cache = job_cache / "diarization.json"
+        if diarization_cache.exists():
+            logger.info(f"Loading cached diarization: {diarization_cache}")
+            speaker_turns_raw = json.loads(diarization_cache.read_text())
+            speaker_turns = {k: [tuple(t) for t in v] for k, v in speaker_turns_raw.items()}
+        else:
+            speaker_turns = step_diarize(vocals)
+            diarization_cache.write_text(json.dumps(
+                {k: list(v) for k, v in speaker_turns.items()}, indent=2
+            ))
+            logger.info(f"Diarization cached: {diarization_cache}")
+
+        segments = step_assign_speakers(segments, speaker_turns)
+
+        # Uloz translation s speaker info
+        translation_cache.write_text(json.dumps(segments, ensure_ascii=False, indent=2))
+
+        # 6. Ref audio pre kazdeho speakera
+        # Ak je zadany externy ref_audio, pouzije sa pre vsetkych speakerov (fallback)
+        if reference_audio_path:
+            speakers = list(set(seg.get("speaker", "SPEAKER_00") for seg in segments))
+            speaker_refs = {s: reference_audio_path for s in speakers}
+            logger.info(f"Using provided ref_audio for all {len(speakers)} speaker(s)")
+        else:
+            speaker_refs = step_extract_speaker_refs(segments, vocals, workdir)
+
+        # 7. TTS (cache)
         if dubbed_voice_cache.exists():
             logger.info(f"Loading cached dubbed voice: {dubbed_voice_cache}")
             dubbed_voice = str(dubbed_voice_cache)
         else:
-            dubbed_voice_tmp = step_tts_clone(segments, ref_audio, workdir, target_lang)
+            dubbed_voice_tmp = step_tts_clone(segments, speaker_refs, workdir, target_lang)
             shutil.copy(dubbed_voice_tmp, dubbed_voice_cache)
             dubbed_voice = str(dubbed_voice_cache)
             logger.info(f"Dubbed voice cached: {dubbed_voice_cache}")
 
-        # 6. Finalny mix
+        # 8. Finalny mix
         step_mix_final(video_path, dubbed_voice, accompaniment, workdir, output_path)
 
         total_seconds = segments[-1]["end"] if segments else 0
+        speakers_found = list(set(seg.get("speaker", "SPEAKER_00") for seg in segments))
         return {
             "output_path": output_path,
             "duration_seconds": round(total_seconds, 1),
             "segments_count": len(segments),
             "target_lang": target_lang,
+            "speakers": speakers_found,
         }
