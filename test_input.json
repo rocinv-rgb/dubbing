@@ -1,7 +1,7 @@
 {
     "input": {
         "video_url": "https://www.youtube.com/watch?v=gA1qKvg4Mh8",
-        "target_lang": "sk",
+        "target_lang": "cs",
         "source_lang": "en",
         "reference_audio_url": null,
         "job_id": "fix"
