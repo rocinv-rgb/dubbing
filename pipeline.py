@@ -468,27 +468,28 @@ def step_tts_clone(
             if len(audio_data) == 0:
                 raise RuntimeError("TTS returned zero-length audio")
 
-            # Time-stretching: natiahnuť/skrátiť TTS na presnu dlzku segmentu
+            # Time-stretching: len spomalenie (nie zrýchlenie) — ak je TTS kratší ako segment, nechaj ticho
+            # Ak je TTS dlhší max o 30%, spomal; ak je viac, orezať (nechaj pretiecť do medzery)
             target_dur = seg["end"] - seg["start"]
             actual_dur = len(audio_data) / tts_sample_rate
             if target_dur > 0.1 and actual_dur > 0.1:
-                ratio = actual_dur / target_dur
-                # atempo akceptuje 0.5-2.0, pre väčšie hodnoty chainujeme
-                if 0.4 < ratio < 2.5:
+                ratio = actual_dur / target_dur  # >1 = TTS je dlhší ako slot
+                # Spomaľ len ak je TTS kratší ako slot (ratio < 1.0) — max spomalenie 0.75x
+                if 0.75 <= ratio < 1.0:
                     stretched_out = os.path.join(workdir, f"seg_{i:04d}_stretched.wav")
-                    if ratio <= 2.0:
-                        atempo = f"atempo={ratio:.4f}"
-                    else:
-                        # chain: 2x atempo pre ratio > 2.0
-                        r1 = min(ratio / 2.0, 2.0) if ratio > 2.0 else ratio
-                        atempo = f"atempo={min(2.0, ratio/2):.4f},atempo={min(2.0, ratio/max(ratio/2,1)):.4f}"
-                    stretch_cmd = ["ffmpeg", "-y", "-i", tmp_out, "-af", atempo, stretched_out]
+                    stretch_cmd = ["ffmpeg", "-y", "-i", tmp_out, "-af", f"atempo={ratio:.4f}", stretched_out]
                     result = subprocess.run(stretch_cmd, capture_output=True, timeout=30)
                     if result.returncode == 0 and os.path.exists(stretched_out):
                         audio_data, sr = sf.read(stretched_out, dtype="float32")
                         if audio_data.ndim > 1:
                             audio_data = audio_data.mean(axis=1)
-                        logger.info(f"Seg {i}: stretched {actual_dur:.2f}s -> {len(audio_data)/tts_sample_rate:.2f}s (target {target_dur:.2f}s)")
+                        logger.info(f"Seg {i}: slowed {actual_dur:.2f}s -> {len(audio_data)/tts_sample_rate:.2f}s (target {target_dur:.2f}s)")
+                elif ratio > 1.0:
+                    # TTS je dlhší — orezať na target + 20% tolerancia
+                    max_samples = int(target_dur * 1.2 * tts_sample_rate)
+                    if len(audio_data) > max_samples:
+                        audio_data = audio_data[:max_samples]
+                        logger.info(f"Seg {i}: trimmed {actual_dur:.2f}s -> {len(audio_data)/tts_sample_rate:.2f}s (target {target_dur:.2f}s)")
 
             peak = np.abs(audio_data).max()
             if peak > 0:
