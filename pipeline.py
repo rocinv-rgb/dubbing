@@ -443,26 +443,29 @@ def _translate_segment_qwen(text: str, target_lang: str, duration: float, model,
 
 
 def step_translate(segments: list[dict], target_lang: str = "cs") -> list[dict]:
-    model, tokenizer = get_qwen()
+    pipe = get_translator()
     translated = []
-    for i, seg in enumerate(segments):
-        text = seg.get("text", "").strip()
-        if not text:
-            translated.append({**seg, "translated": ""})
-            continue
-        duration = seg["end"] - seg["start"]
-        try:
-            result = _translate_segment_qwen(text, target_lang, duration, model, tokenizer)
-            translated.append({**seg, "translated": result})
-            logger.info(f"Seg {i}: '{text[:40]}' -> '{result[:40]}' ({duration:.1f}s, max {int(duration*2.5)}w)")
-        except Exception as e:
-            logger.warning(f"Qwen translation failed seg {i}: {e} — fallback Helsinki")
-            try:
-                pipe = get_translator()
-                result = pipe(text, max_length=512)[0]["translation_text"]
-            except Exception:
-                result = text
-            translated.append({**seg, "translated": result})
+    batch_size = 50
+    texts = [seg["text"] for seg in segments]
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i + batch_size]
+        results = pipe(batch_texts, max_length=512)
+        for j, result in enumerate(results):
+            seg = segments[i + j]
+            trans = result["translation_text"]
+            # Post-process: ak je preklad viac ako 40% dlhsi ako original (pocet znakov),
+            # skusime ho skratit odstranenım poslednej vety
+            orig_len = len(seg["text"])
+            trans_len = len(trans)
+            if trans_len > orig_len * 1.4:
+                # Skrat na poslednu bodku/otaznik/vyksricnik
+                import re
+                sentences = re.split(r'(?<=[.!?])\s+', trans)
+                if len(sentences) > 1:
+                    trans = ' '.join(sentences[:-1])
+                    logger.info(f"Seg {i+j}: skrateny preklad {trans_len} -> {len(trans)} znakov")
+            translated.append({**seg, "translated": trans})
+        logger.info(f"Translated batch {i//batch_size + 1}/{(len(texts)-1)//batch_size + 1}")
     logger.info(f"Translated {len(translated)} segments")
     return translated
 
