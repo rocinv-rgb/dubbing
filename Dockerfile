@@ -44,7 +44,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir TTS>=0.22.0
 
 # --- App súbory ---
-COPY pipeline.py handler.py ./
+COPY pipeline.py handler.py test_input.json ./
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'" || exit 1
