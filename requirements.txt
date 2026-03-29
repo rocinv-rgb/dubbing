@@ -12,6 +12,7 @@ transformers>=4.44.0,<4.51.0
 accelerate>=0.33.0
 bitsandbytes>=0.43.0
 sentencepiece>=0.1.99   # potrebny pre Helsinki-NLP tokenizer
+pyannote.audio>=3.3.0   # speaker diarization
 
 # POZOR: torch / torchvision / torchaudio sa inštalujú v Dockerfile
 # s explicitnou CUDA 12.8 nightly verziou (--index-url pytorch.whl/nightly/cu128).
