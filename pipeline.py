@@ -22,6 +22,36 @@ from pathlib import Path
 # Presmeruj Coqui TTS cache na perzistentny Volume — model sa nestiahne pri kazdom reštarte podu
 os.environ.setdefault("COQUI_TTS_HOME", "/workspace/models")
 
+# torchaudio 2.11+ odstranilo set_audio_backend(), defaultuje na torchcodec (nie je nainštalovany).
+# Monkey-patch torchaudio.load -> soundfile hned pri importe modulu.
+def _patch_torchaudio_load():
+    try:
+        import torchaudio
+        import soundfile as sf
+        if getattr(torchaudio, "_cml_patched", False):
+            return
+        _orig = torchaudio.load
+        def _sf_load(path, frame_offset=0, num_frames=-1, normalize=True,
+                     channels_first=True, format=None, backend=None, **kw):
+            try:
+                data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+                if num_frames > 0:
+                    data = data[frame_offset:frame_offset + num_frames]
+                elif frame_offset > 0:
+                    data = data[frame_offset:]
+                import torch as _t
+                tensor = _t.from_numpy(data.T if channels_first else data)
+                return tensor, sr
+            except Exception:
+                return _orig(path, frame_offset=frame_offset, num_frames=num_frames,
+                             normalize=normalize, channels_first=channels_first)
+        torchaudio.load = _sf_load
+        torchaudio._cml_patched = True
+    except ImportError:
+        pass
+
+_patch_torchaudio_load()
+
 import torch
 import soundfile as sf
 import numpy as np
@@ -79,18 +109,46 @@ def get_qwen():
     return _qwen_pipe
 
 
+def _patch_torchaudio():
+    """
+    torchaudio 2.11+ odstranilo set_audio_backend() a defaultuje na torchcodec
+    ktory nie je nainštalovany. Monkey-patch torchaudio.load -> soundfile.
+    """
+    import torchaudio
+    import soundfile as sf
+
+    if getattr(torchaudio, "_cml_patched", False):
+        return  # uz opatchovane
+
+    _orig_load = torchaudio.load
+
+    def _sf_load(path, frame_offset=0, num_frames=-1, normalize=True,
+                 channels_first=True, format=None, backend=None):
+        try:
+            data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+            if num_frames > 0:
+                data = data[frame_offset:frame_offset + num_frames]
+            elif frame_offset > 0:
+                data = data[frame_offset:]
+            tensor = torch.from_numpy(data.T if channels_first else data)
+            return tensor, sr
+        except Exception:
+            # fallback na povodny loader ak soundfile zlyha
+            return _orig_load(path, frame_offset=frame_offset,
+                              num_frames=num_frames, normalize=normalize,
+                              channels_first=channels_first)
+
+    torchaudio.load = _sf_load
+    torchaudio._cml_patched = True
+    logger.info("torchaudio.load patched -> soundfile (torchcodec workaround)")
+
+
 def get_xtts():
     """Lazy-load XTTS v2 (Coqui TTS). Nevyzaduje nvcc ani deepspeed."""
     global _xtts_model
     if _xtts_model is None:
         import functools
-        import torchaudio
-        # Nastav torchaudio backend na soundfile — torchcodec nie je nainštalovany
-        try:
-            torchaudio.set_audio_backend("soundfile")
-            logger.info("torchaudio backend: soundfile")
-        except Exception as e:
-            logger.warning(f"torchaudio backend set failed: {e}")
+        _patch_torchaudio()
         # PyTorch 2.6+ zmenil default weights_only=True, coz rozbije XTTS checkpoint.
         # Monkey-patch torch.load aby pouzival weights_only=False (XTTS je trusted source).
         _orig_torch_load = torch.load
