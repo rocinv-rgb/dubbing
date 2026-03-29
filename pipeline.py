@@ -312,8 +312,18 @@ def step_translate(segments: list[dict], target_lang: str = "cs") -> list[dict]:
     return translated
 
 
-def _normalize_text(t: str) -> str:
+def _num_to_words(m, lang="cs"):
+    try:
+        from num2words import num2words
+        return num2words(int(m.group(0).replace('\xa0', '').replace(' ', '')), lang=lang)
+    except Exception:
+        return m.group(0)
+
+def _normalize_text(t: str, lang="cs") -> str:
+    # Spoj tisícové medzery: "1 700" -> "1700"
     t = re.sub(r'(\d)\s(\d{3})\b', r'\1\2', t)
+    # Preveď čísla na slová
+    t = re.sub(r'\b\d+\b', lambda m: _num_to_words(m, lang), t)
     t = re.sub(r'  +', ' ', t)
     return t.strip()
 
@@ -348,7 +358,7 @@ def step_tts_clone(
     prev_end = 0.0
 
     for i, seg in enumerate(segments):
-        text = _normalize_text(seg.get("translated", seg.get("text", "")))
+        text = _normalize_text(seg.get("translated", seg.get("text", "")), lang=target_lang)
         if not text:
             continue
 
