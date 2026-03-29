@@ -80,12 +80,20 @@ def get_xtts():
     """Lazy-load XTTS v2 (Coqui TTS). Nevyzaduje nvcc ani deepspeed."""
     global _xtts_model
     if _xtts_model is None:
-        from TTS.api import TTS as CoquiTTS
-        logger.info("Loading XTTS v2...")
-        tts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2")
-        tts.to(DEVICE)
-        _xtts_model = tts
-        logger.info("XTTS v2 loaded.")
+        import functools
+        # PyTorch 2.6+ zmenil default weights_only=True, coz rozbije XTTS checkpoint.
+        # Monkey-patch torch.load aby pouzival weights_only=False (XTTS je trusted source).
+        _orig_torch_load = torch.load
+        torch.load = functools.partial(_orig_torch_load, weights_only=False)
+        try:
+            from TTS.api import TTS as CoquiTTS
+            logger.info("Loading XTTS v2...")
+            tts = CoquiTTS("tts_models/multilingual/multi-dataset/xtts_v2")
+            tts.to(DEVICE)
+            _xtts_model = tts
+            logger.info("XTTS v2 loaded.")
+        finally:
+            torch.load = _orig_torch_load  # vrat povodny torch.load
     return _xtts_model
 
 
