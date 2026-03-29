@@ -609,24 +609,20 @@ def step_mix_final(
 ) -> str:
     orig_srt, cs_srt = step_generate_srt(segments, workdir)
 
-    # Mix audio
+    # Mix audio — ciste video bez titulkov (SRT su ulozene osobitne v cache)
     cmd = [
         "ffmpeg", "-y",
         "-i", original_video,
         "-i", dubbed_voice,
         "-i", accompaniment,
-        "-i", orig_srt,
-        "-i", cs_srt,
         "-filter_complex",
         "[1:a]volume=1.0[voice];[2:a]volume=0.5[music];[voice][music]amix=inputs=2:duration=first[aout]",
-        "-map", "0:v", "-map", "[aout]", "-map", "3:s", "-map", "4:s",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-c:s", "mov_text",
-        "-metadata:s:s:0", "language=eng", "-metadata:s:s:0", "title=Original",
-        "-metadata:s:s:1", "language=ces", "-metadata:s:s:1", "title=Czech",
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
         "-shortest", output_path,
     ]
     _ffmpeg(cmd, timeout=600, step="final_mix")
-    logger.info(f"Final video so soft titulkami: {output_path}")
+    logger.info(f"Final video: {output_path}")
     return output_path
 
 
@@ -650,6 +646,8 @@ def run_dubbing_pipeline(
     transcription_cache = job_cache / "transcription.json"
     translation_cache   = job_cache / "translation.json"
     dubbed_voice_cache  = job_cache / "dubbed_voice.wav"
+    srt_orig_cache      = job_cache / "subtitles_orig.srt"
+    srt_cs_cache        = job_cache / "subtitles_cs.srt"
 
     with tempfile.TemporaryDirectory(prefix=f"dubbing_{job_id}_") as workdir:
         # 1. Extrakcia audia
@@ -713,7 +711,14 @@ def run_dubbing_pipeline(
             dubbed_voice = str(dubbed_voice_cache)
             logger.info(f"Dubbed voice cached: {dubbed_voice_cache}")
 
-        # 8. Finalny mix + titulky
+        # 8. SRT titulky do cache
+        orig_srt, cs_srt = step_generate_srt(segments, workdir)
+        import shutil as _shutil
+        _shutil.copy(orig_srt, srt_orig_cache)
+        _shutil.copy(cs_srt, srt_cs_cache)
+        logger.info(f"SRT ulozene: {srt_orig_cache}, {srt_cs_cache}")
+
+        # 9. Finalny mix — ciste video
         step_mix_final(video_path, dubbed_voice, accompaniment, segments, workdir, output_path)
 
         total_seconds = segments[-1]["end"] if segments else 0
