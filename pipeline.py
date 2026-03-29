@@ -536,6 +536,7 @@ def step_tts_clone(
                 speaker_wav=ref_path,
                 language=xtts_lang,
                 file_path=tmp_out,
+                speed=1.3,
             )
             if not os.path.exists(tmp_out) or os.path.getsize(tmp_out) < 100:
                 raise RuntimeError(f"TTS output missing or empty: {tmp_out}")
