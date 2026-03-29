@@ -566,7 +566,7 @@ def run_dubbing_pipeline(
             speaker_turns_raw = json.loads(diarization_cache.read_text())
             speaker_turns = {k: [tuple(t) for t in v] for k, v in speaker_turns_raw.items()}
         else:
-            speaker_turns = step_diarize(vocals)
+            speaker_turns = step_diarize(raw_audio)
             diarization_cache.write_text(json.dumps(
                 {k: list(v) for k, v in speaker_turns.items()}, indent=2
             ))
