@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y \
     python3.10 python3-pip \
     ffmpeg sox libsox-dev \
     git curl wget \
+    openssh-client \
     libsndfile1 libgomp1 \
     espeak-ng \
     && apt-get clean \
