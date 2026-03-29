@@ -67,15 +67,11 @@ def get_qwen():
     global _qwen_pipe
     if _qwen_pipe is None:
         from transformers import pipeline
-        model_path = MODEL_DIR / "qwen3-14B"
-        model_id = str(model_path) if model_path.exists() else "Qwen/Qwen3-14B"
-        logger.info(f"Loading Qwen3-14B from {model_id}...")
+        logger.info("Loading Helsinki-NLP translation model...")
         _qwen_pipe = pipeline(
-            "text-generation",
-            model=model_id,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            max_new_tokens=1024,
+            "translation",
+            model="Helsinki-NLP/opus-mt-en-cs",
+            device=0 if torch.cuda.is_available() else -1,
         )
     return _qwen_pipe
 
@@ -173,58 +169,26 @@ def _parse_translation_json(raw: str, batch_size: int) -> dict[int, str]:
     return {}
 
 
-def step_translate(segments: list[dict], target_lang: str = "sk") -> list[dict]:
+def step_translate(segments: list[dict], target_lang: str = "cs") -> list[dict]:
     """
-    Qwen3-14B: prelozi segmenty v batchoch 20, zachova timing.
-    Few-shot JSON prompt — odolny voci verbose prefixom modelu.
+    Helsinki-NLP opus-mt: rýchly preklad bez thinking mode.
+    Batch po 50, priamy translation pipeline.
     """
-    LANG_NAMES = {
-        "sk": "Slovak", "cs": "Czech", "de": "German",
-        "fr": "French", "es": "Spanish", "it": "Italian",
-        "pl": "Polish", "hu": "Hungarian", "uk": "Ukrainian", "ru": "Russian",
-    }
-    lang_name = LANG_NAMES.get(target_lang, target_lang)
     pipe = get_qwen()
     translated = []
 
-    batch_size = 20
-    for i in range(0, len(segments), batch_size):
-        batch = segments[i:i + batch_size]
-        items_json = json.dumps(
-            [{"id": j, "text": seg["text"]} for j, seg in enumerate(batch)],
-            ensure_ascii=False,
-        )
-        prompt = (
-            f'Translate each "text" value to {lang_name} for dubbing (voice-over).\n'
-            f'Rules:\n'
-            f'- Natural, fluent spoken language — NOT word-for-word\n'
-            f'- CRITICAL: translated text must have approximately the same number of words as the original (±30%)\n'
-            f'- If original is 5 words, translation must be ~4-7 words. If 15 words, ~10-20 words.\n'
-            f'- Keep meaning and tone. Short punchy sentences.\n'
-            f'- Return ONLY a valid JSON array. No explanation, no markdown, no preamble.\n\n'
-            f'Example input:  [{{"id": 0, "text": "Hello world"}}, {{"id": 1, "text": "How are you doing today?"}}]\n'
-            f'Example output: [{{"id": 0, "text": "Ahoj světe"}}, {{"id": 1, "text": "Jak se dnes máš?"}}]\n\n'
-            f'Input: {items_json}\n'
-            f'Output:'
-        )
-        response = pipe(
-            [
-                {"role": "system", "content": "You are a professional translator. /no_think"},
-                {"role": "user", "content": prompt},
-            ],
-            return_full_text=False,
-            max_new_tokens=256,
-            temperature=0.3,
-            do_sample=True,
-        )
-        raw = response[0]["generated_text"].strip()
-        lines = _parse_translation_json(raw, len(batch))
+    batch_size = 50
+    texts = [seg["text"] for seg in segments]
 
-        for j, seg in enumerate(batch):
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i + batch_size]
+        results = pipe(batch_texts, max_length=512)
+        for j, result in enumerate(results):
             translated.append({
-                **seg,
-                "translated": lines.get(j, seg["text"]),  # fallback = original
+                **segments[i + j],
+                "translated": result["translation_text"],
             })
+        logger.info(f"Translated batch {i//batch_size + 1}/{(len(texts)-1)//batch_size + 1}")
 
     logger.info(f"Translated {len(translated)} segments")
     return translated
