@@ -19,6 +19,9 @@ import tempfile
 import logging
 from pathlib import Path
 
+# Presmeruj Coqui TTS cache na perzistentny Volume — model sa nestiahne pri kazdom reštarte podu
+os.environ.setdefault("COQUI_TTS_HOME", "/workspace/models")
+
 import torch
 import soundfile as sf
 import numpy as np
