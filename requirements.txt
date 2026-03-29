@@ -31,3 +31,4 @@ huggingface_hub>=0.24.0
 boto3>=1.34.0        # S3/R2 upload
 requests>=2.31.0
 tqdm>=4.66.0
+num2words
