@@ -18,7 +18,7 @@ WORKDIR /app
 
 # System deps
 RUN apt-get update && apt-get install -y \
-    python3.10 python3-pip \
+    python3.10 python3-pip python3.10-venv \
     ffmpeg sox libsox-dev \
     git curl wget \
     openssh-client \
@@ -47,7 +47,7 @@ RUN pip install --no-cache-dir TTS>=0.22.0
 
 # --- Krok 4: Separátny venv pre audio-separator (MDX23C) ---
 # Nemôže byť v hlavnom env — konflikt numpy 2.x vs 1.22 (TTS požiadavka)
-RUN python -m venv /venv-separator --system-site-packages=false && \
+RUN python -m venv /venv-separator && \
     /venv-separator/bin/pip install --no-cache-dir --upgrade pip && \
     /venv-separator/bin/pip install --no-cache-dir "audio-separator[gpu]"
 
