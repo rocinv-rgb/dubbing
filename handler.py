@@ -193,8 +193,7 @@ def handler(job: dict) -> dict:
     with tempfile.TemporaryDirectory(prefix=f"job_{job_id}_") as workdir:
         try:
             # Stiahnutie videa (yt-dlp pre YouTube, requests pre priame URL)
-            video_path = os.path.join(workdir, "input.mp4")
-            download_video(video_url, video_path, job_id)
+            video_path = download_video(video_url, os.path.join(workdir, "input.mp4"), job_id)
 
             # Stiahnutie referencneho audia (ak zadane)
             ref_audio_path = None
