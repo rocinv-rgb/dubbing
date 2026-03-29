@@ -169,8 +169,13 @@ def step_separate_audio(audio_path: str, workdir: str) -> tuple[str, str]:
 
     script = f"""
 import sys
-sys.path.insert(0, '/venv-separator/lib/python3.10/site-packages')
+# Pridaj venv packages ale NECHAJ systemovy torch (CUDA)
+venv_site = '/venv-separator/lib/python3.10/site-packages'
+sys_site = [p for p in sys.path if 'site-packages' in p and 'venv-separator' not in p]
+sys.path = [venv_site] + sys_site
 from audio_separator.separator import Separator
+import torch
+print('CUDA:', torch.cuda.is_available(), file=sys.stderr)
 sep = Separator(
     model_file_dir='{SEPARATOR_MODEL_DIR}',
     output_dir='{workdir}',
@@ -182,7 +187,7 @@ out = sep.separate('{audio_path}')
 print('|'.join(out))
 """
     result = subprocess.run(
-        [SEPARATOR_VENV, "-c", script],
+        ["python", "-c", script],
         capture_output=True, text=True, timeout=600
     )
     if result.returncode != 0:
