@@ -1,6 +1,14 @@
 """
 pipeline.py - AI Dubbing Pipeline
-Kroky: FFmpeg -> Whisper -> Qwen3-14B (preklad) -> XTTS v2 (TTS+klonovanie) -> FFmpeg mix
+Kroky: FFmpeg -> Whisper -> Helsinki-NLP (preklad) -> XTTS v2 (TTS+klonovanie) -> FFmpeg mix
+
+Verzia 1.3:
+- Canvas model: kazdy TTS clip overlay-ovany na presny timestamp (ziadny kumulativny drift)
+- ffmpeg atempo time-stretch: TTS clip sa zmesti do available_duration slotu
+- enrich_segments_with_available_duration(): O(n) algoritmus, vyuziva pauzy medzi segmentmi
+- merge_speaker_blocks(): zlucuje po sebe iduce segmenty toho isteho speakera
+  (rovnaky speaker_id, pauza < MAX_MERGE_PAUSE_S, blok max MAX_MERGE_BLOCK_S)
+- PAUSE_MARKER: konstanta (None/"..."/"," atd), prepisatelna z job inputu
 
 Verzia 1.2:
 - Demucs odstraneny (padal na nvcc) — pouziva cele audio
@@ -43,6 +51,12 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/workspace/models"))
 CACHE_DIR = Path(os.environ.get("CACHE_DIR", "/workspace/cache"))
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# --- Konfigurácia zlučovania segmentov ---
+# Prepisatelne z job inputu (pozri run_dubbing_pipeline parameter pause_marker)
+PAUSE_MARKER: str | None = None   # None = ignoruj pauzy, "..." = vloz marker medzi vety
+MAX_MERGE_PAUSE_S: float = 1.0    # max pauza medzi segmentmi na zlucenie (s)
+MAX_MERGE_BLOCK_S: float = 7.0    # max dlzka zluceneho bloku (s)
 
 # Lazy-loaded globals (nacitaju sa raz pri prvom jobu = warm start)
 _whisper_model = None
@@ -194,6 +208,92 @@ def step_translate(segments: list[dict], target_lang: str = "cs") -> list[dict]:
     return translated
 
 
+def enrich_segments_with_available_duration(segments: list[dict], video_end: float) -> list[dict]:
+    """
+    O(n) algoritmus: pre kazdy segment spocita available_duration =
+    slot (end-start) + pauza do dalsiho segmentu.
+    Vysledok sa pouziva v step_tts_clone namiesto caseho slotu — TTS moze
+    vyuzit ticho pred dalsim segmentom a nemusite ho toho zrychlovat.
+    """
+    for i, seg in enumerate(segments):
+        slot = seg["end"] - seg["start"]
+        if i + 1 < len(segments):
+            pause = segments[i + 1]["start"] - seg["end"]
+        else:
+            pause = video_end - seg["end"]
+        seg["available_duration"] = slot + max(0.0, pause)
+    return segments
+
+
+def merge_speaker_blocks(
+    segments: list[dict],
+    max_pause_s: float = MAX_MERGE_PAUSE_S,
+    max_block_s: float = MAX_MERGE_BLOCK_S,
+    pause_marker: str | None = PAUSE_MARKER,
+) -> list[dict]:
+    """
+    Zlucuje po sebe iduce segmenty toho isteho speakera do blokov.
+    Podmienky pre zlucenie:
+      - rovnaky speaker_id (ak chyba, povazuje sa za rovnakeho)
+      - pauza medzi segmentmi < max_pause_s
+      - celkova dlzka bloku (end posledneho - start prveho) <= max_block_s
+
+    Zluceny blok ma:
+      - start = start prveho segmentu
+      - end   = end posledneho segmentu
+      - available_duration = suma available_duration vsetkych zlucených
+      - text / translated  = spojene pause_marker-om (alebo medzerou)
+      - speaker_id         = speaker_id prveho segmentu
+
+    Segmenty bez speaker_id sa nikdy nezlucuju s inym.
+    """
+    if not segments:
+        return segments
+
+    merged: list[dict] = []
+    current = dict(segments[0])
+    # Normalizuj: ak nema speaker_id, pouzijeme unikatny sentinel
+    current.setdefault("speaker_id", f"__nospeaker_{0}__")
+
+    for i in range(1, len(segments)):
+        seg = segments[i]
+        seg_speaker = seg.get("speaker_id", f"__nospeaker_{i}__")
+        cur_speaker = current.get("speaker_id", "")
+
+        pause = seg["start"] - current["end"]
+        block_end = seg["end"]
+        block_duration = block_end - current["start"]
+
+        can_merge = (
+            cur_speaker == seg_speaker
+            and not cur_speaker.startswith("__nospeaker_")
+            and pause < max_pause_s
+            and block_duration <= max_block_s
+        )
+
+        if can_merge:
+            # Zluc text/translated
+            joiner = pause_marker if pause_marker is not None else " "
+            if "translated" in current and "translated" in seg:
+                current["translated"] = current["translated"].rstrip() + joiner + seg["translated"].lstrip()
+            if "text" in current and "text" in seg:
+                current["text"] = current["text"].rstrip() + joiner + seg["text"].lstrip()
+            current["end"] = seg["end"]
+            # available_duration: suma (pauzy sa uz spotrebuju v bloku)
+            current["available_duration"] = (
+                current.get("available_duration", current["end"] - current["start"])
+                + seg.get("available_duration", seg["end"] - seg["start"])
+            )
+        else:
+            merged.append(current)
+            current = dict(seg)
+            current.setdefault("speaker_id", f"__nospeaker_{i}__")
+
+    merged.append(current)
+    logger.info(f"merge_speaker_blocks: {len(segments)} → {len(merged)} blokov")
+    return merged
+
+
 def _stretch_audio_ffmpeg(audio_data: np.ndarray, sample_rate: int, speed_factor: float) -> np.ndarray:
     """
     Time-stretch audio pomocou FFmpeg atempo filtra.
@@ -309,13 +409,16 @@ def step_tts_clone(
             if len(audio_data) == 0:
                 raise RuntimeError("TTS returned zero-length audio")
 
-            # --- TIME-STRETCH ak TTS clip nezapadá do slotu ---
+            # --- TIME-STRETCH ak TTS clip nezapadá do available_duration ---
+            # available_duration = slot + pauza do dalsiho (predpocitane v enrich_segments)
+            # Fallback na slot_duration ak enrich nebol volany (napr. stara cache)
+            available_s = seg.get("available_duration", slot_duration_s)
             tts_duration_s = len(audio_data) / tts_sample_rate
-            if slot_duration_s > 0.1:
-                speed_factor = tts_duration_s / slot_duration_s
+            if available_s > 0.1:
+                speed_factor = tts_duration_s / available_s
                 if abs(speed_factor - 1.0) > 0.05:  # >5% odchylka -> stretch
                     logger.info(
-                        f"Seg {i}: slot={slot_duration_s:.2f}s TTS={tts_duration_s:.2f}s "
+                        f"Seg {i}: available={available_s:.2f}s TTS={tts_duration_s:.2f}s "
                         f"→ stretch x{speed_factor:.2f}"
                     )
                     audio_data = _stretch_audio_ffmpeg(audio_data, tts_sample_rate, speed_factor)
@@ -388,6 +491,7 @@ def run_dubbing_pipeline(
     source_lang: str | None,
     output_path: str,
     job_id: str = "local",
+    pause_marker: str | None = PAUSE_MARKER,
 ) -> dict:
     """
     Spusti cely pipeline.
@@ -433,6 +537,16 @@ def run_dubbing_pipeline(
                 json.dumps(segments, ensure_ascii=False, indent=2)
             )
             logger.info(f"Translation cached: {translation_cache}")
+
+        # 4b. Enrich + merge (vždy — rýchly algoritmus, bez cache)
+        video_end = segments[-1]["end"] + 1.0 if segments else 10.0
+        segments = enrich_segments_with_available_duration(segments, video_end)
+        segments = merge_speaker_blocks(
+            segments,
+            max_pause_s=MAX_MERGE_PAUSE_S,
+            max_block_s=MAX_MERGE_BLOCK_S,
+            pause_marker=pause_marker,
+        )
 
         # 5. TTS (cache)
         if dubbed_voice_cache.exists():
