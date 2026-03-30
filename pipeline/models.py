@@ -105,15 +105,22 @@ def get_openvoice():
             url = os.environ.get("OPENVOICE_CHECKPOINT_URL", "https://myshell-public-repo-host.s3.amazonaws.com/openvoice/checkpoints_v2_0417.zip")
             logger.info(f"Stahuju OpenVoice V2 checkpointy...")
             OPENVOICE_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-            with urllib.request.urlopen(url) as r:
-                with zipfile.ZipFile(_io.BytesIO(r.read())) as z:
-                    # ZIP obsahuje checkpoints_v2_0417/ — extrahujeme a premiestnime na OPENVOICE_CHECKPOINT_DIR
-                    z.extractall(str(MODEL_DIR))
-            # Presun checkpoints_v2_0417/* -> OPENVOICE_CHECKPOINT_DIR
-            import shutil as _shutil
-            extracted = MODEL_DIR / 'checkpoints_v2_0417'
-            if extracted.exists() and not OPENVOICE_CHECKPOINT_DIR.exists():
-                _shutil.move(str(extracted), str(OPENVOICE_CHECKPOINT_DIR))
+            import shutil as _shutil, tempfile as _tempfile
+            with _tempfile.TemporaryDirectory() as tmpdir:
+                with urllib.request.urlopen(url) as r:
+                    with zipfile.ZipFile(_io.BytesIO(r.read())) as z:
+                        z.extractall(tmpdir)
+                # ZIP moze obsahovat checkpoints_v2_0417/ alebo checkpoints_v2/ — najdi co tam je
+                import pathlib as _pl
+                candidates = [d for d in _pl.Path(tmpdir).iterdir() if d.is_dir()]
+                if candidates:
+                    extracted = candidates[0]
+                    # Presun obsah (base_speakers/, converter/) priamo do OPENVOICE_CHECKPOINT_DIR
+                    for item in extracted.iterdir():
+                        dest = OPENVOICE_CHECKPOINT_DIR / item.name
+                        if dest.exists():
+                            _shutil.rmtree(str(dest)) if dest.is_dir() else dest.unlink()
+                        _shutil.move(str(item), str(dest))
             logger.info("OpenVoice V2 checkpointy stiahnute.")
         try:
             from openvoice.api import ToneColorConverter
