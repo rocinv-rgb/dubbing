@@ -249,7 +249,10 @@ if __name__ == "__main__":
         job = {"id": "local-test", "input": test_job.get("input", test_job)}
         result = handler(job)
         print("\n=== RESULT ===")
-        print(_json.dumps(result, indent=2, ensure_ascii=False))
+        result_log = {k: v for k, v in result.items() if k != "output_video_url"}
+        print(_json.dumps(result_log, indent=2, ensure_ascii=False))
+        if "output_video_url" in result:
+            print(f"output_video_url: {result['output_video_url']}")
     else:
         logger.info("[serverless] No test_input.json, starting RunPod serverless worker...")
         runpod.serverless.start({"handler": handler})
