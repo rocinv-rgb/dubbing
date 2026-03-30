@@ -49,7 +49,11 @@ RUN pip install --no-cache-dir TTS>=0.22.0
 RUN sed -i 's/torch\.load(f, map_location=map_location, \*\*kwargs)/torch.load(f, map_location=map_location, weights_only=False)/' \
     /usr/local/lib/python3.10/dist-packages/TTS/utils/io.py
 
-# OpenVoice V2
+# OpenVoice V2 — pkg-config + libav needed for MeloTTS (PyAV dependency)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libavformat-dev libavcodec-dev libavdevice-dev \
+    libavutil-dev libswscale-dev libswresample-dev libavfilter-dev && \
+    rm -rf /var/lib/apt/lists/*
 RUN git clone https://github.com/myshell-ai/OpenVoice /opt/openvoice && \
     pip install -e /opt/openvoice && \
     pip install git+https://github.com/myshell-ai/MeloTTS.git
