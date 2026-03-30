@@ -107,7 +107,13 @@ def get_openvoice():
             OPENVOICE_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
             with urllib.request.urlopen(url) as r:
                 with zipfile.ZipFile(_io.BytesIO(r.read())) as z:
+                    # ZIP obsahuje checkpoints_v2_0417/ — extrahujeme a premiestnime na OPENVOICE_CHECKPOINT_DIR
                     z.extractall(str(MODEL_DIR))
+            # Presun checkpoints_v2_0417/* -> OPENVOICE_CHECKPOINT_DIR
+            import shutil as _shutil
+            extracted = MODEL_DIR / 'checkpoints_v2_0417'
+            if extracted.exists() and not OPENVOICE_CHECKPOINT_DIR.exists():
+                _shutil.move(str(extracted), str(OPENVOICE_CHECKPOINT_DIR))
             logger.info("OpenVoice V2 checkpointy stiahnute.")
         from openvoice.api import ToneColorConverter
         converter = ToneColorConverter(f"{ckpt_path}/config.json", device=DEVICE)

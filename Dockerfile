@@ -58,7 +58,7 @@ RUN sed -i 's/torch\.load(f, map_location=map_location, \*\*kwargs)/torch.load(f
 # rozbili pyannote. Instalujeme len OpenVoice samotny + jeho skutocne runtime deps pre TCC.
 RUN git clone https://github.com/myshell-ai/OpenVoice /opt/openvoice && \
     pip install --no-cache-dir --no-deps -e /opt/openvoice && \
-    pip install --no-cache-dir librosa pydub wavmark inflect unidecode pypinyin cn2an jieba langid
+    pip install --no-cache-dir librosa pydub wavmark inflect unidecode pypinyin cn2an jieba langid eng_to_ipa
 
 ENV OPENVOICE_CHECKPOINT_URL="https://myshell-public-repo-host.s3.amazonaws.com/openvoice/checkpoints_v2_0417.zip"
 ENV MELOTTS_INSTALL_ON_STARTUP="true"
