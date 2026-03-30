@@ -64,7 +64,7 @@ ENV OPENVOICE_CHECKPOINT_URL="https://myshell-public-repo-host.s3.amazonaws.com/
 ENV MELOTTS_INSTALL_ON_STARTUP="true"
 
 # --- Krok 7: audio-separator venv (izolovaný, numpy==1.22 konflikt s pyannote) ---
-RUN apt-get update && apt-get install -y python3-venv && apt-get clean && rm -rf /var/lib/apt/lists/* && \
+RUN apt-get update && apt-get install -y python3.10-venv && apt-get clean && rm -rf /var/lib/apt/lists/* && \
     python3 -m venv /venv-separator && \
     /venv-separator/bin/pip install --no-cache-dir "audio-separator[gpu]" && \
     /venv-separator/bin/pip install --no-cache-dir numpy==1.22.0 scipy==1.11.4
