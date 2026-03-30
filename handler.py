@@ -172,7 +172,7 @@ def handler(job: dict) -> dict:
         logger.error(f"[{job_id}] Missing video_url")
         return {"error": "Missing required field: video_url"}
 
-    target_lang = job_input.get("target_lang", "cs").strip().lower()
+    target_lang = job_input.get("target_lang", "sk").strip().lower()
     if target_lang not in SUPPORTED_LANGS:
         logger.error(f"[{job_id}] Unsupported target_lang: {target_lang}")
         return {
@@ -182,6 +182,11 @@ def handler(job: dict) -> dict:
 
     source_lang    = job_input.get("source_lang", "en").strip().lower()
     ref_audio_url  = (job_input.get("reference_audio_url") or "").strip() or None
+    # pause_marker: None = ignoruj pauzy, "..." = vloz marker, "," = carka atd.
+    # Ak nie je v inpute, pouzije sa PAUSE_MARKER konstanta z pipeline.py
+    from pipeline import PAUSE_MARKER as _DEFAULT_PAUSE_MARKER
+    pause_marker_raw = job_input.get("pause_marker", "__default__")
+    pause_marker = _DEFAULT_PAUSE_MARKER if pause_marker_raw == "__default__" else (pause_marker_raw or None)
 
     logger.info(
         f"[{job_id}] {source_lang} -> {target_lang} | "
@@ -193,7 +198,8 @@ def handler(job: dict) -> dict:
     with tempfile.TemporaryDirectory(prefix=f"job_{job_id}_") as workdir:
         try:
             # Stiahnutie videa (yt-dlp pre YouTube, requests pre priame URL)
-            video_path = download_video(video_url, os.path.join(workdir, "input.mp4"), job_id)
+            video_path = os.path.join(workdir, "input.mp4")
+            download_video(video_url, video_path, job_id)
 
             # Stiahnutie referencneho audia (ak zadane)
             ref_audio_path = None
@@ -201,10 +207,10 @@ def handler(job: dict) -> dict:
                 ref_audio_path = os.path.join(workdir, "reference.wav")
                 download_file(ref_audio_url, ref_audio_path, job_id)
 
-            output_path = f"/workspace/output_{job_id}.mp4"
+            output_path = os.path.join(workdir, "output_dubbed.mp4")
 
             # Pipeline
-            logger.info(f"[{job_id}] Starting pipeline...")
+            logger.info(f"[{job_id}] Starting pipeline... pause_marker={pause_marker!r}")
             result = run_dubbing_pipeline(
                 video_path=video_path,
                 reference_audio_path=ref_audio_path,
@@ -212,6 +218,7 @@ def handler(job: dict) -> dict:
                 source_lang=source_lang,
                 output_path=output_path,
                 job_id=job_id,
+                pause_marker=pause_marker,
             )
             logger.info(
                 f"[{job_id}] Pipeline done | "
@@ -254,14 +261,7 @@ if __name__ == "__main__":
         job = {"id": "local-test", "input": test_job.get("input", test_job)}
         result = handler(job)
         print("\n=== RESULT ===")
-        result_log = {k: v for k, v in result.items() if k != "output_video_url"}
-        print(_json.dumps(result_log, indent=2, ensure_ascii=False))
-        if "output_video_url" in result:
-            url = result["output_video_url"]
-            if url.startswith("data:"):
-                print(f"output_video_url: <base64, {len(url)//1024} KB>")
-            else:
-                print(f"output_video_url: {url}")
+        print(_json.dumps(result, indent=2, ensure_ascii=False))
     else:
         logger.info("[serverless] No test_input.json, starting RunPod serverless worker...")
         runpod.serverless.start({"handler": handler})
