@@ -117,7 +117,8 @@ def download_file(url: str, dest_path: str, job_id: str) -> str:
 def upload_file(local_path: str, job_id: str) -> str:
     """
     Nahraje subor na S3/R2 a vrati URL.
-    Fallback: base64 data URI pre male subory (testovanie bez bucketu).
+    Fallback: skopiruje do /workspace/output_<job_id>.mp4 a vrati lokalnu cestu.
+    NIKDY nerobime base64 — je to zbytocne a zahltuje konzolu.
     """
     if OUTPUT_BUCKET_URL:
         import boto3
@@ -134,22 +135,13 @@ def upload_file(local_path: str, job_id: str) -> str:
         logger.info(f"[{job_id}] Uploaded: {url}")
         return url
 
-    # Fallback: base64 — len pre dev/testing, nie pre produkcne videa
-    size = os.path.getsize(local_path)
-    if size > BASE64_SIZE_LIMIT:
-        logger.warning(
-            f"[{job_id}] OUTPUT_BUCKET_URL not set and file is {size / 1024 / 1024:.0f} MB "
-            f"(> {BASE64_SIZE_LIMIT // 1024 // 1024} MB limit). "
-            f"Nastav OUTPUT_BUCKET_URL + S3_* env vars pre produkcne nasadenie."
-        )
-        raise RuntimeError(
-            f"File too large ({size // 1024 // 1024} MB) for base64 fallback. "
-            "Set OUTPUT_BUCKET_URL environment variable."
-        )
-    with open(local_path, "rb") as f:
-        encoded = base64.b64encode(f.read()).decode("utf-8")
-    logger.info(f"[{job_id}] Returning base64 ({size // 1024} KB) — dev mode")
-    return f"data:video/mp4;base64,{encoded}"
+    # Fallback: uloz do /workspace (perzistentny Volume na pode)
+    import shutil
+    out_path = f"/workspace/output_{job_id}.mp4"
+    shutil.copy(local_path, out_path)
+    size = os.path.getsize(out_path)
+    logger.info(f"[{job_id}] Saved locally: {out_path} ({size // 1024 // 1024} MB)")
+    return out_path
 
 
 # --- RunPod handler ---
