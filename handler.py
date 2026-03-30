@@ -1,4 +1,8 @@
 """
+Nepouzivat, coskoro zmazem, kod sa presunul do 
+h_v1.py
+
+
 handler.py - RunPod Serverless Entry Point
 
 Vstup (job["input"]):
