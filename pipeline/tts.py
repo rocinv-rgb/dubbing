@@ -175,21 +175,61 @@ def step_tone_convert(
     target_ref_wav: str,
     workdir: str,
     output_path: str,
+    ov_alpha: float = 0.35,
+    ov_tau: float = 0.1,
+    czech_base_wav: str | None = None,
 ) -> str:
     """
-    OpenVoice V2 TCC — pouziva converter.extract_se() priamo (nie se_extractor.get_se)
-    aby sme sa vyhli zavislosti na faster_whisper/av ktore sa nedaju buildovat.
+    OpenVoice V2 TCC — prenasa farbu hlasu (tembr) z originalneho speakera
+    bez prenosu anglickeho prizvuku.
+
+    Blend embeddingov:
+        blended_tgt_se = ov_alpha * tgt_se_original + (1 - ov_alpha) * czech_base_se
+
+    Parametre:
+        ov_alpha (0.0-1.0):
+            0.0 = ziadny prenos z originalu (cista ceska base vzorka)
+            0.35 = jemny tembr originalu, dominuje cestina (default)
+            1.0 = plny prenos vcetne anglickeho prizvuku
+        ov_tau (0.0-1.0):
+            Teplota PosteriorEncodera. Nizsia = deterministickejsi prenos.
+            0.1 = minimum noise, cisty tembr (default)
+            0.3 = OpenVoice default
+        czech_base_wav:
+            Cesta k ceskej base vzorke pre blend. Ak None, pouzije source_ref_wav
+            (blend nema efekt — fallback na standardne spravanie).
     """
     from .models import get_openvoice
-    import torch
+
     converter = get_openvoice()
-    # extract_se priamo z wav suborov — nepotrebuje Whisper ani VAD
+
+    # src_se — z XTTS outputu (ceska rec generovana z czech_base)
     source_se = converter.extract_se([source_ref_wav])
-    target_se = converter.extract_se([target_ref_wav])
+
+    # tgt_se — z originalneho anglickeho speakera (obsahuje tembr + prizvuk)
+    target_se_raw = converter.extract_se([target_ref_wav])
+
+    # Blend: zmiesaj tgt_se s czech_base_se aby sme preniesli len tembr, nie prizvuk
+    if czech_base_wav and os.path.exists(czech_base_wav) and 0.0 <= ov_alpha <= 1.0:
+        czech_se = converter.extract_se([czech_base_wav])
+        # Linearna interpolacia v embedding priestore (256-dim gin_channels)
+        blended_se = ov_alpha * target_se_raw + (1.0 - ov_alpha) * czech_se
+        logger.info(
+            f"OV2 blend: alpha={ov_alpha:.2f} tau={ov_tau:.2f} "
+            f"| tembr z originálu: {ov_alpha*100:.0f}%, čeština: {(1-ov_alpha)*100:.0f}%"
+        )
+    else:
+        blended_se = target_se_raw
+        logger.info(
+            f"OV2 bez blendu "
+            f"(czech_base={'missing' if not czech_base_wav else 'not found'}, alpha={ov_alpha})"
+        )
+
     converter.convert(
         audio_src_path=tts_audio_path,
         src_se=source_se,
-        tgt_se=target_se,
+        tgt_se=blended_se,
+        tau=ov_tau,
         output_path=output_path,
     )
     return output_path
@@ -201,6 +241,8 @@ def step_tts_clone(
     workdir: str,
     target_lang: str = "sk",
     use_openvoice: bool = False,
+    ov_alpha: float = 0.35,
+    ov_tau: float = 0.1,
 ) -> str:
     """
     XTTS v2 (Coqui TTS) zero-shot voice cloning — CANVAS MODEL.
@@ -218,6 +260,8 @@ def step_tts_clone(
     - dict {speaker_id: path}: per-speaker referencie
 
     use_openvoice=True: dvojkrokovy process — XTTS s ceskou base vzorkou + OpenVoice V2 TCC prefarbenie
+    ov_alpha: sila prenosu tembru z originalu (0.0-1.0, default 0.35)
+    ov_tau: teplota TCC konverzie (0.0-1.0, default 0.1)
     """
     XTTS_LANG_MAP = {
         "sk": "sk", "cs": "cs", "de": "de", "fr": "fr",
@@ -286,7 +330,11 @@ def step_tts_clone(
             if use_openvoice and czech_base:
                 try:
                     tmp_ov = os.path.join(workdir, f"seg_{i:04d}_ov.wav")
-                    step_tone_convert(tmp_out, czech_base, ref_wav, workdir, tmp_ov)
+                    step_tone_convert(
+                        tmp_out, czech_base, ref_wav, workdir, tmp_ov,
+                        ov_alpha=ov_alpha, ov_tau=ov_tau,
+                        czech_base_wav=czech_base,
+                    )
                     audio_data, sr = sf.read(tmp_ov, dtype="float32")
                     if audio_data.ndim > 1:
                         audio_data = audio_data.mean(axis=1)
