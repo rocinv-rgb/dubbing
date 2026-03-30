@@ -252,21 +252,20 @@ def merge_speaker_blocks(
 
     merged: list[dict] = []
     current = dict(segments[0])
-    # Normalizuj: ak nema speaker_id, pouzijeme unikatny sentinel
-    current.setdefault("speaker_id", f"__nospeaker_{0}__")
+
 
     for i in range(1, len(segments)):
         seg = segments[i]
-        seg_speaker = seg.get("speaker_id", f"__nospeaker_{i}__")
-        cur_speaker = current.get("speaker_id", "")
+        seg_speaker = seg.get("speaker_id") or seg.get("speaker") or ""
+        cur_speaker = current.get("speaker_id") or current.get("speaker") or ""
 
         pause = seg["start"] - current["end"]
         block_end = seg["end"]
         block_duration = block_end - current["start"]
 
         can_merge = (
-            cur_speaker == seg_speaker
-            and not cur_speaker.startswith("__nospeaker_")
+            cur_speaker != ""
+            and cur_speaker == seg_speaker
             and pause < max_pause_s
             and block_duration <= max_block_s
         )
@@ -287,7 +286,6 @@ def merge_speaker_blocks(
         else:
             merged.append(current)
             current = dict(seg)
-            current.setdefault("speaker_id", f"__nospeaker_{i}__")
 
     merged.append(current)
     logger.info(f"merge_speaker_blocks: {len(segments)} → {len(merged)} blokov")
