@@ -815,38 +815,6 @@ def step_mix_final(
 
 # --- Hlavna funkcia ---
 
-def step_mix_final(
-    original_video: str,
-    dubbed_voice: str,
-    accompaniment: str,
-    workdir: str,
-    output_path: str,
-) -> str:
-    """
-    FFmpeg: zmiesaj novy hlas (0dB) + sprievod (0.7x) + zachovaj video.
-    """
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", original_video,
-        "-i", dubbed_voice,
-        "-i", accompaniment,
-        "-filter_complex",
-        "[1:a]volume=1.0[voice];[2:a]volume=0.7[music];[voice][music]amix=inputs=2:duration=first[aout]",
-        "-map", "0:v",
-        "-map", "[aout]",
-        "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
-        output_path,
-    ]
-    _ffmpeg(cmd, timeout=600, step="final_mix")
-    logger.info(f"Final video: {output_path}")
-    return output_path
-
-
-# --- Hlavna funkcia ---
-
-
 def run_dubbing_pipeline(
     video_path: str,
     reference_audio_path: str | None,
