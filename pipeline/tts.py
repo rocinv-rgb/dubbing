@@ -178,11 +178,16 @@ def step_tone_convert(
     workdir: str,
     output_path: str,
 ) -> str:
-    from openvoice import se_extractor
+    """
+    OpenVoice V2 TCC — pouziva converter.extract_se() priamo (nie se_extractor.get_se)
+    aby sme sa vyhli zavislosti na faster_whisper/av ktore sa nedaju buildovat.
+    """
     from .models import get_openvoice
+    import torch
     converter = get_openvoice()
-    source_se, _ = se_extractor.get_se(source_ref_wav, converter, vad=True)
-    target_se, _ = se_extractor.get_se(target_ref_wav, converter, vad=True)
+    # extract_se priamo z wav suborov — nepotrebuje Whisper ani VAD
+    source_se = converter.extract_se([source_ref_wav])
+    target_se = converter.extract_se([target_ref_wav])
     converter.convert(
         audio_src_path=tts_audio_path,
         src_se=source_se,
