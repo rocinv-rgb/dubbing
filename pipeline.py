@@ -686,6 +686,7 @@ def step_tts_clone(
 
     for i, seg in enumerate(segments):
         text = seg.get("translated", seg.get("text", "")).strip()
+        text = _normalize_text(text, xtts_lang)
         if not text:
             continue
 
