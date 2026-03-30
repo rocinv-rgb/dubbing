@@ -175,11 +175,13 @@ def handler(job: dict) -> dict:
     pause_marker_raw = job_input.get("pause_marker", "__default__")
     pause_marker = _DEFAULT_PAUSE_MARKER if pause_marker_raw == "__default__" else (pause_marker_raw or None)
     use_openvoice = job_input.get("use_openvoice", False)
+    ov_alpha = float(job_input.get("ov_alpha", 0.35))
+    ov_tau   = float(job_input.get("ov_tau",   0.10))
 
     logger.info(
         f"[{job_id}] {source_lang} -> {target_lang} | "
         f"ref_audio={'yes' if ref_audio_url else 'no (auto)'} | "
-        f"use_openvoice={use_openvoice} | "
+        f"use_openvoice={use_openvoice} ov_alpha={ov_alpha} ov_tau={ov_tau} | "
         f"video={video_url}"
     )
 
@@ -210,6 +212,8 @@ def handler(job: dict) -> dict:
                 job_id=job_id,
                 pause_marker=pause_marker,
                 use_openvoice=use_openvoice,
+                ov_alpha=ov_alpha,
+                ov_tau=ov_tau,
             )
             logger.info(
                 f"[{job_id}] Pipeline done | "
