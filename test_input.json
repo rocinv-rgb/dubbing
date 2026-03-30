@@ -1,9 +1,7 @@
 {
-    "input": {
-        "video_url": "/workspace/test_video.mp4",
-        "target_lang": "cs",
-        "source_lang": "en",
-        "reference_audio_url": null,
-        "job_id": "fix"
-    }
+  "video_url": "/workspace/test_video_2min.mp4",
+  "target_lang": "cs",
+  "source_lang": "en",
+  "job_id": "test_ov",
+  "use_openvoice": true
 }
