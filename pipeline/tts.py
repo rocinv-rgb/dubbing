@@ -154,19 +154,17 @@ def _stretch_audio_ffmpeg(audio_data: np.ndarray, sample_rate: int, speed_factor
 
 
 def _ensure_czech_base_speaker() -> str:
+    """
+    Vrati cestu k českej base vzorke pre XTTS.
+    Subor musi byt predpripraveny na /workspace/models/czech_base_speaker.wav
+    (uploadnuty manualne alebo pri prvom deploymente).
+    """
     from .config import CZECH_BASE_SPEAKER
-    if CZECH_BASE_SPEAKER.exists():
-        return str(CZECH_BASE_SPEAKER)
-    logger.info("Stahujem cesku base vzorku z Mozilla Common Voice...")
-    CZECH_BASE_SPEAKER.parent.mkdir(parents=True, exist_ok=True)
-    url = "https://huggingface.co/datasets/mozilla-foundation/common_voice_11_0/resolve/main/audio/cs/train/common_voice_cs_24004527.mp3"
-    import urllib.request
-    mp3_path = str(CZECH_BASE_SPEAKER).replace('.wav', '.mp3')
-    urllib.request.urlretrieve(url, mp3_path)
-    from .audio import _ffmpeg
-    _ffmpeg(["ffmpeg", "-y", "-i", mp3_path, "-ar", "22050", "-ac", "1", str(CZECH_BASE_SPEAKER)],
-            timeout=30, step="czech_base_convert")
-    import os; os.remove(mp3_path)
+    if not CZECH_BASE_SPEAKER.exists():
+        raise RuntimeError(
+            f"Czech base speaker not found: {CZECH_BASE_SPEAKER}. "
+            f"Upload a Czech WAV sample to {CZECH_BASE_SPEAKER} on the RunPod volume."
+        )
     logger.info(f"Czech base speaker: {CZECH_BASE_SPEAKER}")
     return str(CZECH_BASE_SPEAKER)
 
