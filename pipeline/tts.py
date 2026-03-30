@@ -300,6 +300,9 @@ def step_tts_clone(
             tts_duration_s = len(audio_data) / tts_sample_rate
             if available_s > 0.1:
                 speed_factor = tts_duration_s / available_s
+                # Minimum speed_factor = 0.75 (max 25% spomalenie) — pod tym je hlas nezrozumitelny
+                # Ak je TTS prilis kratky na slot, nechame prirodzenu pauzu po segmente
+                speed_factor = max(0.75, speed_factor)
                 if abs(speed_factor - 1.0) > 0.05:  # >5% odchylka -> stretch
                     logger.info(
                         f"Seg {i}: available={available_s:.2f}s TTS={tts_duration_s:.2f}s "
