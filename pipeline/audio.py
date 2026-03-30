@@ -39,10 +39,14 @@ def step_separate_audio(audio_path: str, workdir: str) -> tuple[str, str]:
     Fallback: ak venv neexistuje, vrati povodne audio pre oba vystupy.
     """
     if not os.path.exists(SEPARATOR_VENV):
-        logger.warning("audio-separator venv nenajdeny — preskakujem separaciu, pouzivam povodne audio")
+        logger.warning("audio-separator venv nenajdeny — preskakujem separaciu, generujem tiche accompaniment")
         vocals = os.path.join(workdir, "vocals.wav")
         shutil.copy(audio_path, vocals)
-        return vocals, audio_path
+        # Ticha stopa ako accompaniment — zabrani mixovaniu povodneho hlasu do vystupu
+        silence = os.path.join(workdir, "silence.wav")
+        _ffmpeg(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                 "-t", "300", silence], timeout=30, step="gen_silence")
+        return vocals, silence
 
     vocals_out = os.path.join(workdir, "vocals.wav")
     accompaniment_out = os.path.join(workdir, "accompaniment.wav")
