@@ -115,9 +115,15 @@ def get_openvoice():
             if extracted.exists() and not OPENVOICE_CHECKPOINT_DIR.exists():
                 _shutil.move(str(extracted), str(OPENVOICE_CHECKPOINT_DIR))
             logger.info("OpenVoice V2 checkpointy stiahnute.")
-        from openvoice.api import ToneColorConverter
-        converter = ToneColorConverter(f"{ckpt_path}/config.json", device=DEVICE, enable_watermark=False)
-        converter.load_ckpt(f"{ckpt_path}/checkpoint.pth")
-        _openvoice_converter = converter
-        logger.info("OpenVoice V2 TCC loaded.")
+        try:
+            from openvoice.api import ToneColorConverter
+            converter = ToneColorConverter(f"{ckpt_path}/config.json", device=DEVICE)
+            converter.load_ckpt(f"{ckpt_path}/checkpoint.pth")
+            _openvoice_converter = converter
+            logger.info("OpenVoice V2 TCC loaded.")
+        except Exception as e:
+            logger.warning(f"OpenVoice load failed: {e} — TCC disabled")
+            _openvoice_converter = False
+    if _openvoice_converter is False:
+        return None
     return _openvoice_converter
