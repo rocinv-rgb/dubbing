@@ -644,6 +644,7 @@ def run_dubbing_pipeline(
     source_lang: str | None,
     output_path: str,
     job_id: str = "local",
+    pause_marker: str | None = None,
 ) -> dict:
     """
     Spusti cely pipeline s per-speaker voice cloning.
