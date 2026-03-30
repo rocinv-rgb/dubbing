@@ -191,7 +191,6 @@ def step_tone_convert(
         src_se=source_se,
         tgt_se=target_se,
         output_path=output_path,
-        message="@MyShell",
     )
     return output_path
 

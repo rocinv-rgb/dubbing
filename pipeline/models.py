@@ -116,7 +116,7 @@ def get_openvoice():
                 _shutil.move(str(extracted), str(OPENVOICE_CHECKPOINT_DIR))
             logger.info("OpenVoice V2 checkpointy stiahnute.")
         from openvoice.api import ToneColorConverter
-        converter = ToneColorConverter(f"{ckpt_path}/config.json", device=DEVICE)
+        converter = ToneColorConverter(f"{ckpt_path}/config.json", device=DEVICE, enable_watermark=False)
         converter.load_ckpt(f"{ckpt_path}/checkpoint.pth")
         _openvoice_converter = converter
         logger.info("OpenVoice V2 TCC loaded.")
