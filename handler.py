@@ -11,7 +11,7 @@ Vstup (job["input"]):
 
 Vystup:
 {
-    "output_video_url":  "https://...",   # S3/R2 URL, alebo data:video/mp4;base64,...
+    "output_video_url":  "https://...",   # S3/R2 URL, alebo lokalna cesta /workspace/output_*.mp4
     "duration_seconds":  142.3,
     "segments_count":    47,
     "cost_estimate_usd": 0.65             # pri cene $5/min
@@ -20,7 +20,6 @@ Vystup:
 
 import os
 import uuid
-import base64
 import logging
 import tempfile
 import subprocess
@@ -44,7 +43,6 @@ S3_SECRET_KEY     = os.environ.get("S3_SECRET_KEY", "")
 S3_BUCKET         = os.environ.get("S3_BUCKET", "dubbing-outputs")
 
 SUPPORTED_LANGS = {"sk", "cs", "de", "fr", "es", "it", "pl", "hu"}
-BASE64_SIZE_LIMIT = 50 * 1024 * 1024  # 50 MB
 
 
 # --- Pomocne funkcie ---
@@ -117,8 +115,8 @@ def download_file(url: str, dest_path: str, job_id: str) -> str:
 def upload_file(local_path: str, job_id: str) -> str:
     """
     Nahraje subor na S3/R2 a vrati URL.
-    Fallback: skopiruje do /workspace/output_<job_id>.mp4 a vrati lokalnu cestu.
-    NIKDY nerobime base64 — je to zbytocne a zahltuje konzolu.
+    Fallback (ladenie): output_path je uz rovno v /workspace — vrati cestu bez kópie.
+    NIKDY nerobime base64 ani zbytocne kopirovanie.
     """
     if OUTPUT_BUCKET_URL:
         import boto3
@@ -135,13 +133,10 @@ def upload_file(local_path: str, job_id: str) -> str:
         logger.info(f"[{job_id}] Uploaded: {url}")
         return url
 
-    # Fallback: uloz do /workspace (perzistentny Volume na pode)
-    import shutil
-    out_path = f"/workspace/output_{job_id}.mp4"
-    shutil.copy(local_path, out_path)
-    size = os.path.getsize(out_path)
-    logger.info(f"[{job_id}] Saved locally: {out_path} ({size // 1024 // 1024} MB)")
-    return out_path
+    # Fallback: subor je uz v /workspace (output_path nastaveny priamo tam)
+    size = os.path.getsize(local_path)
+    logger.info(f"[{job_id}] Output ready: {local_path} ({size // 1024 // 1024} MB)")
+    return local_path
 
 
 # --- RunPod handler ---
@@ -200,7 +195,7 @@ def handler(job: dict) -> dict:
                 ref_audio_path = os.path.join(workdir, "reference.wav")
                 download_file(ref_audio_url, ref_audio_path, job_id)
 
-            output_path = os.path.join(workdir, "output_dubbed.mp4")
+            output_path = f"/workspace/output_{job_id}.mp4"
 
             # Pipeline
             logger.info(f"[{job_id}] Starting pipeline... pause_marker={pause_marker!r}")
