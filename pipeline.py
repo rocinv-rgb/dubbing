@@ -721,12 +721,18 @@ def run_dubbing_pipeline(
             dubbed_voice = str(dubbed_voice_cache)
             logger.info(f"Dubbed voice cached: {dubbed_voice_cache}")
 
-        # 8. SRT titulky do cache
+        # 8. SRT titulky do cache aj vedla output videa (player ich najde automaticky)
         orig_srt, cs_srt = step_generate_srt(segments, workdir)
         import shutil as _shutil
         _shutil.copy(orig_srt, srt_orig_cache)
         _shutil.copy(cs_srt, srt_cs_cache)
-        logger.info(f"SRT ulozene: {srt_orig_cache}, {srt_cs_cache}")
+        # Uloz vedla output videa — rovnaky nazov ako video
+        output_stem = os.path.splitext(output_path)[0]
+        srt_out_cs   = output_stem + ".srt"
+        srt_out_orig = output_stem + ".en.srt"
+        _shutil.copy(cs_srt, srt_out_cs)
+        _shutil.copy(orig_srt, srt_out_orig)
+        logger.info(f"SRT ulozene: {srt_out_cs}, {srt_out_orig}")
 
         # 9. Finalny mix — ciste video
         step_mix_final(video_path, dubbed_voice, accompaniment, segments, workdir, output_path)
