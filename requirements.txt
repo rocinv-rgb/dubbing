@@ -32,3 +32,4 @@ boto3>=1.34.0        # S3/R2 upload
 requests>=2.31.0
 tqdm>=4.66.0
 num2words
+sacremoses>=0.0.53      # potrebny pre Helsinki-NLP tokenizer (potlaci warning)
