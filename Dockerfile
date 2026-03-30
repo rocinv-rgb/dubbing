@@ -18,10 +18,9 @@ WORKDIR /app
 
 # System deps
 RUN apt-get update && apt-get install -y \
-    python3.10 python3-pip python3.10-venv \
+    python3.10 python3-pip \
     ffmpeg sox libsox-dev \
     git curl wget \
-    openssh-client \
     libsndfile1 libgomp1 \
     espeak-ng \
     && apt-get clean \
@@ -45,11 +44,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Musí byť po torch — TTS si stiahne závislosti bez toho aby prepísal torch
 RUN pip install --no-cache-dir TTS>=0.22.0
 
-# --- Krok 4: Separátny venv pre audio-separator (MDX23C) ---
-# Nemôže byť v hlavnom env — konflikt numpy 2.x vs 1.22 (TTS požiadavka)
-RUN python -m venv /venv-separator && \
-    /venv-separator/bin/pip install --no-cache-dir --upgrade pip && \
-    /venv-separator/bin/pip install --no-cache-dir "audio-separator[gpu]"
+# --- Krok 4: Fix torch.load weights_only pre XTTS (PyTorch 2.6+ breaking change) ---
+# XTTS checkpoint je pickle — torch 2.6 zmenil default weights_only=True, XTTS to neocakava
+RUN sed -i 's/torch\.load(f, map_location=map_location, \*\*kwargs)/torch.load(f, map_location=map_location, weights_only=False)/' \
+    /usr/local/lib/python3.10/dist-packages/TTS/utils/io.py
 
 # --- App súbory ---
 COPY pipeline.py handler.py test_input.json ./
