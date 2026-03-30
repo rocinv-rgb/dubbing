@@ -57,6 +57,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PAUSE_MARKER: str | None = None   # None = ignoruj pauzy, "..." = vloz marker medzi vety
 MAX_MERGE_PAUSE_S: float = 1.0    # max pauza medzi segmentmi na zlucenie (s)
 MAX_MERGE_BLOCK_S: float = 7.0    # max dlzka zluceneho bloku (s)
+SEGMENT_GAP_MS: float = 75.0      # buffer (ms) — TTS skonci aspon X ms pred zaciatkom dalsej vety
 
 # Lazy-loaded globals (nacitaju sa raz pri prvom jobu = warm start)
 _whisper_model = None
@@ -208,17 +209,23 @@ def step_translate(segments: list[dict], target_lang: str = "cs") -> list[dict]:
     return translated
 
 
-def enrich_segments_with_available_duration(segments: list[dict], video_end: float) -> list[dict]:
+def enrich_segments_with_available_duration(
+    segments: list[dict],
+    video_end: float,
+    gap_ms: float = SEGMENT_GAP_MS,
+) -> list[dict]:
     """
     O(n) algoritmus: pre kazdy segment spocita available_duration =
-    slot (end-start) + pauza do dalsiho segmentu.
-    Vysledok sa pouziva v step_tts_clone namiesto caseho slotu — TTS moze
-    vyuzit ticho pred dalsim segmentom a nemusite ho toho zrychlovat.
+    slot (end-start) + pauza do dalsiho segmentu - gap_ms buffer.
+
+    gap_ms zabezpeci ze TTS skonci aspon X ms pred zaciatkom dalsej vety.
+    Ak je pauza kratsia ako gap_ms -> available_duration = len slot (bez rozsierovania).
     """
+    gap_s = gap_ms / 1000.0
     for i, seg in enumerate(segments):
         slot = seg["end"] - seg["start"]
         if i + 1 < len(segments):
-            pause = segments[i + 1]["start"] - seg["end"]
+            pause = segments[i + 1]["start"] - seg["end"] - gap_s
         else:
             pause = video_end - seg["end"]
         seg["available_duration"] = slot + max(0.0, pause)
