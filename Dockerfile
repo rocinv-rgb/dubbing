@@ -49,6 +49,13 @@ RUN pip install --no-cache-dir TTS>=0.22.0
 RUN sed -i 's/torch\.load(f, map_location=map_location, \*\*kwargs)/torch.load(f, map_location=map_location, weights_only=False)/' \
     /usr/local/lib/python3.10/dist-packages/TTS/utils/io.py
 
+# OpenVoice V2
+RUN git clone https://github.com/myshell-ai/OpenVoice /opt/openvoice && \
+    pip install -e /opt/openvoice && \
+    pip install git+https://github.com/myshell-ai/MeloTTS.git
+
+ENV OPENVOICE_CHECKPOINT_URL="https://myshell-public-repo-host.s3.amazonaws.com/openvoice/checkpoints_v2_0417.zip"
+
 # --- App súbory ---
 COPY pipeline.py handler.py test_input.json ./
 

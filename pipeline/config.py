@@ -16,3 +16,6 @@ PAUSE_MARKER: str | None = None   # None = ignoruj pauzy, "..." = vloz marker me
 MAX_MERGE_PAUSE_S: float = 1.0    # max pauza medzi segmentmi na zlucenie (s)
 MAX_MERGE_BLOCK_S: float = 7.0    # max dlzka zluceneho bloku (s)
 SEGMENT_GAP_MS: float = 75.0      # buffer (ms) — TTS skonci aspon X ms pred zaciatkom dalsej vety
+
+CZECH_BASE_SPEAKER = MODEL_DIR / "czech_base_speaker.wav"
+OPENVOICE_CHECKPOINT_DIR = MODEL_DIR / "openvoice"

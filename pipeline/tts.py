@@ -153,11 +153,52 @@ def _stretch_audio_ffmpeg(audio_data: np.ndarray, sample_rate: int, speed_factor
     return stretched
 
 
+def _ensure_czech_base_speaker() -> str:
+    from .config import CZECH_BASE_SPEAKER
+    if CZECH_BASE_SPEAKER.exists():
+        return str(CZECH_BASE_SPEAKER)
+    logger.info("Stahujem cesku base vzorku z Mozilla Common Voice...")
+    CZECH_BASE_SPEAKER.parent.mkdir(parents=True, exist_ok=True)
+    url = "https://huggingface.co/datasets/mozilla-foundation/common_voice_11_0/resolve/main/audio/cs/train/common_voice_cs_24004527.mp3"
+    import urllib.request
+    mp3_path = str(CZECH_BASE_SPEAKER).replace('.wav', '.mp3')
+    urllib.request.urlretrieve(url, mp3_path)
+    from .audio import _ffmpeg
+    _ffmpeg(["ffmpeg", "-y", "-i", mp3_path, "-ar", "22050", "-ac", "1", str(CZECH_BASE_SPEAKER)],
+            timeout=30, step="czech_base_convert")
+    import os; os.remove(mp3_path)
+    logger.info(f"Czech base speaker: {CZECH_BASE_SPEAKER}")
+    return str(CZECH_BASE_SPEAKER)
+
+
+def step_tone_convert(
+    tts_audio_path: str,
+    source_ref_wav: str,
+    target_ref_wav: str,
+    workdir: str,
+    output_path: str,
+) -> str:
+    from openvoice import se_extractor
+    from .models import get_openvoice
+    converter = get_openvoice()
+    source_se, _ = se_extractor.get_se(source_ref_wav, converter, vad=True)
+    target_se, _ = se_extractor.get_se(target_ref_wav, converter, vad=True)
+    converter.convert(
+        audio_src_path=tts_audio_path,
+        src_se=source_se,
+        tgt_se=target_se,
+        output_path=output_path,
+        message="@MyShell",
+    )
+    return output_path
+
+
 def step_tts_clone(
     segments: list[dict],
     reference_audio_path,  # str alebo dict {speaker_id: path}
     workdir: str,
     target_lang: str = "sk",
+    use_openvoice: bool = False,
 ) -> str:
     """
     XTTS v2 (Coqui TTS) zero-shot voice cloning — CANVAS MODEL.
@@ -173,6 +214,8 @@ def step_tts_clone(
     reference_audio_path moze byt:
     - str: jedna referencna stopa pre vsetkych speakerov
     - dict {speaker_id: path}: per-speaker referencie
+
+    use_openvoice=True: dvojkrokovy process — XTTS s ceskou base vzorkou + OpenVoice V2 TCC prefarbenie
     """
     XTTS_LANG_MAP = {
         "sk": "sk", "cs": "cs", "de": "de", "fr": "fr",
@@ -182,6 +225,8 @@ def step_tts_clone(
     xtts_lang = XTTS_LANG_MAP.get(target_lang, "en")
     model = get_xtts()
     tts_sample_rate = 24000
+
+    czech_base = _ensure_czech_base_speaker() if use_openvoice else None
 
     # Normalize reference_audio_path na dict
     if isinstance(reference_audio_path, dict):
@@ -220,9 +265,10 @@ def step_tts_clone(
             speaker_id = seg.get("speaker", "SPEAKER_00")
             ref_wav = speaker_refs.get(speaker_id, default_ref)
             tmp_out = os.path.join(workdir, f"seg_{i:04d}.wav")
+            tts_ref = czech_base if use_openvoice else ref_wav
             model.tts_to_file(
                 text=text,
-                speaker_wav=ref_wav,
+                speaker_wav=tts_ref,
                 language=xtts_lang,
                 file_path=tmp_out,
             )
@@ -233,6 +279,17 @@ def step_tts_clone(
                 audio_data = audio_data.mean(axis=1)
             if len(audio_data) == 0:
                 raise RuntimeError("TTS returned zero-length audio")
+
+            # OpenVoice TCC — prefarbenie na hlas speakera
+            if use_openvoice and czech_base:
+                try:
+                    tmp_ov = os.path.join(workdir, f"seg_{i:04d}_ov.wav")
+                    step_tone_convert(tmp_out, czech_base, ref_wav, workdir, tmp_ov)
+                    audio_data, sr = sf.read(tmp_ov, dtype="float32")
+                    if audio_data.ndim > 1:
+                        audio_data = audio_data.mean(axis=1)
+                except Exception as ov_err:
+                    logger.warning(f"OpenVoice TCC failed for seg {i}: {ov_err} — pouzivam XTTS output")
 
             # --- TIME-STRETCH ak TTS clip nezapadá do available_duration ---
             # available_duration = slot + pauza do dalsiho (predpocitane v enrich_segments)

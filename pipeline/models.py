@@ -89,3 +89,29 @@ def get_diarize_pipeline():
         _diarize_pipeline.to(torch.device(DEVICE))
         logger.info("Diarization pipeline loaded.")
     return _diarize_pipeline
+
+
+_openvoice_converter = None
+
+def get_openvoice():
+    global _openvoice_converter
+    if _openvoice_converter is None:
+        from .config import OPENVOICE_CHECKPOINT_DIR
+        ckpt_path = str(OPENVOICE_CHECKPOINT_DIR / "converter")
+        # Stiahni checkpointy ak neexistuju
+        import urllib.request, zipfile, io as _io
+        ckpt_file = OPENVOICE_CHECKPOINT_DIR / "converter" / "checkpoint.pth"
+        if not ckpt_file.exists():
+            url = os.environ.get("OPENVOICE_CHECKPOINT_URL", "https://myshell-public-repo-host.s3.amazonaws.com/openvoice/checkpoints_v2_0417.zip")
+            logger.info(f"Stahuju OpenVoice V2 checkpointy...")
+            OPENVOICE_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+            with urllib.request.urlopen(url) as r:
+                with zipfile.ZipFile(_io.BytesIO(r.read())) as z:
+                    z.extractall(str(MODEL_DIR))
+            logger.info("OpenVoice V2 checkpointy stiahnute.")
+        from openvoice.api import ToneColorConverter
+        converter = ToneColorConverter(f"{ckpt_path}/config.json", device=DEVICE)
+        converter.load_ckpt(f"{ckpt_path}/checkpoint.pth")
+        _openvoice_converter = converter
+        logger.info("OpenVoice V2 TCC loaded.")
+    return _openvoice_converter

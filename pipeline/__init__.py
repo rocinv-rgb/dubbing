@@ -71,6 +71,7 @@ def run_dubbing_pipeline(
     output_path: str,
     job_id: str = "local",
     pause_marker: str | None = None,
+    use_openvoice: bool = False,
 ) -> dict:
     """
     Spusti cely pipeline s per-speaker voice cloning.
@@ -142,7 +143,7 @@ def run_dubbing_pipeline(
             logger.info(f"Loading cached dubbed voice: {dubbed_voice_cache}")
             dubbed_voice = str(dubbed_voice_cache)
         else:
-            dubbed_voice_tmp = step_tts_clone(segments, speaker_refs, workdir, target_lang)
+            dubbed_voice_tmp = step_tts_clone(segments, speaker_refs, workdir, target_lang, use_openvoice=use_openvoice)
             shutil.copy(dubbed_voice_tmp, dubbed_voice_cache)
             dubbed_voice = str(dubbed_voice_cache)
             logger.info(f"Dubbed voice cached: {dubbed_voice_cache}")

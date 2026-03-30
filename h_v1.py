@@ -174,10 +174,12 @@ def handler(job: dict) -> dict:
     from pipeline import PAUSE_MARKER as _DEFAULT_PAUSE_MARKER
     pause_marker_raw = job_input.get("pause_marker", "__default__")
     pause_marker = _DEFAULT_PAUSE_MARKER if pause_marker_raw == "__default__" else (pause_marker_raw or None)
+    use_openvoice = job_input.get("use_openvoice", False)
 
     logger.info(
         f"[{job_id}] {source_lang} -> {target_lang} | "
         f"ref_audio={'yes' if ref_audio_url else 'no (auto)'} | "
+        f"use_openvoice={use_openvoice} | "
         f"video={video_url}"
     )
 
@@ -198,7 +200,7 @@ def handler(job: dict) -> dict:
             output_path = f"/workspace/output_{job_id}.mp4"
 
             # Pipeline
-            logger.info(f"[{job_id}] Starting pipeline... pause_marker={pause_marker!r}")
+            logger.info(f"[{job_id}] Starting pipeline... pause_marker={pause_marker!r} use_openvoice={use_openvoice}")
             result = run_dubbing_pipeline(
                 video_path=video_path,
                 reference_audio_path=ref_audio_path,
@@ -207,6 +209,7 @@ def handler(job: dict) -> dict:
                 output_path=output_path,
                 job_id=job_id,
                 pause_marker=pause_marker,
+                use_openvoice=use_openvoice,
             )
             logger.info(
                 f"[{job_id}] Pipeline done | "
