@@ -27,6 +27,36 @@ import tempfile
 import logging
 from pathlib import Path
 
+# torchaudio 2.11+ odstranilo set_audio_backend(), defaultuje na torchcodec (nie je nainštalovany).
+# Monkey-patch torchaudio.load -> soundfile hned pri importe modulu.
+def _patch_torchaudio_load():
+    try:
+        import torchaudio
+        import soundfile as _sf
+        if getattr(torchaudio, "_cml_patched", False):
+            return
+        _orig = torchaudio.load
+        def _sf_load(path, frame_offset=0, num_frames=-1, normalize=True,
+                     channels_first=True, format=None, backend=None, **kw):
+            try:
+                import torch as _t
+                data, sr = _sf.read(str(path), dtype="float32", always_2d=True)
+                if num_frames > 0:
+                    data = data[frame_offset:frame_offset + num_frames]
+                elif frame_offset > 0:
+                    data = data[frame_offset:]
+                tensor = _t.from_numpy(data.T if channels_first else data)
+                return tensor, sr
+            except Exception:
+                return _orig(path, frame_offset=frame_offset, num_frames=num_frames,
+                             normalize=normalize, channels_first=channels_first)
+        torchaudio.load = _sf_load
+        torchaudio._cml_patched = True
+    except ImportError:
+        pass
+
+_patch_torchaudio_load()
+
 import torch
 import soundfile as sf
 import numpy as np
