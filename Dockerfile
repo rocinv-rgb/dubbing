@@ -54,12 +54,11 @@ RUN sed -i 's/torch\.load(f, map_location=map_location, \*\*kwargs)/torch.load(f
     /usr/local/lib/python3.10/dist-packages/TTS/utils/io.py
 
 # --- Krok 6: OpenVoice V2 ---
-# MeloTTS sa NEINSTALLUJE v builde — stahuje sa pri prvom spusteni na pode (pip nema internet v builde)
-# av pinned wheel pre Python 3.10 / Ubuntu 22.04
-RUN pip install --no-cache-dir "av==12.3.0" --only-binary=av || pip install --no-cache-dir "av==12.3.0"
+# --no-deps: OpenVoice requirements obsahuju av (cez faster-whisper) a numpy==1.22 ktore by
+# rozbili pyannote. Instalujeme len OpenVoice samotny + jeho skutocne runtime deps pre TCC.
 RUN git clone https://github.com/myshell-ai/OpenVoice /opt/openvoice && \
-    sed -i '/^av/d' /opt/openvoice/requirements.txt && \
-    pip install --no-cache-dir -e /opt/openvoice
+    pip install --no-cache-dir --no-deps -e /opt/openvoice && \
+    pip install --no-cache-dir librosa pydub wavmark inflect unidecode pypinyin cn2an jieba langid
 
 ENV OPENVOICE_CHECKPOINT_URL="https://myshell-public-repo-host.s3.amazonaws.com/openvoice/checkpoints_v2_0417.zip"
 ENV MELOTTS_INSTALL_ON_STARTUP="true"
