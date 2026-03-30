@@ -143,6 +143,9 @@ def run_dubbing_pipeline(
             logger.info(f"Loading cached dubbed voice: {dubbed_voice_cache}")
             dubbed_voice = str(dubbed_voice_cache)
         else:
+            # Enrichment: pre kazdy segment spocita available_duration = slot + pauza do dalsiho
+            video_end = segments[-1]["end"] if segments else 0
+            segments = enrich_segments_with_available_duration(segments, video_end=video_end)
             dubbed_voice_tmp = step_tts_clone(segments, speaker_refs, workdir, target_lang, use_openvoice=use_openvoice)
             shutil.copy(dubbed_voice_tmp, dubbed_voice_cache)
             dubbed_voice = str(dubbed_voice_cache)
