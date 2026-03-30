@@ -58,6 +58,7 @@ RUN sed -i 's/torch\.load(f, map_location=map_location, \*\*kwargs)/torch.load(f
 # av pinned wheel pre Python 3.10 / Ubuntu 22.04
 RUN pip install --no-cache-dir "av==12.3.0" --only-binary=av || pip install --no-cache-dir "av==12.3.0"
 RUN git clone https://github.com/myshell-ai/OpenVoice /opt/openvoice && \
+    sed -i '/^av/d' /opt/openvoice/requirements.txt && \
     pip install --no-cache-dir -e /opt/openvoice
 
 ENV OPENVOICE_CHECKPOINT_URL="https://myshell-public-repo-host.s3.amazonaws.com/openvoice/checkpoints_v2_0417.zip"
