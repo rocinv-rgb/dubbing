@@ -479,11 +479,14 @@ def step_translate(segments: list[dict], target_lang: str = "cs") -> list[dict]:
 
 
 def _num_to_words(m, lang="cs"):
+    raw = m.group(0).replace('\xa0', '').replace(' ', '')
     try:
         from num2words import num2words
-        return num2words(int(m.group(0).replace('\xa0', '').replace(' ', '')), lang=lang)
+        return num2words(int(raw), lang=lang)
     except Exception:
-        return m.group(0)
+        digit_words = {"0":"nula","1":"jedna","2":"dva","3":"tri","4":"styri",
+                       "5":"pet","6":"sest","7":"sedem","8":"osem","9":"devet"}
+        return " ".join(digit_words.get(c, c) for c in raw)
 
 def _normalize_text(t: str, lang="cs") -> str:
     # Spoj tisícové medzery: "1 700" -> "1700"
