@@ -636,7 +636,7 @@ def _stretch_audio_ffmpeg(audio_data: np.ndarray, sample_rate: int, speed_factor
 
 def step_tts_clone(
     segments: list[dict],
-    reference_audio_path: str,
+    reference_audio_path,  # str alebo dict {speaker_id: path}
     workdir: str,
     target_lang: str = "sk",
 ) -> str:
@@ -650,6 +650,10 @@ def step_tts_clone(
     Ak TTS clip je dlhsi ako segment slot → time-stretch cez ffmpeg atempo.
     Max stretch ratio: 3.0x (ak prelozena veta je 3x dlhsia = problem prekladu).
     Sample rate vystupu: 24000 Hz.
+
+    reference_audio_path moze byt:
+    - str: jedna referencna stopa pre vsetkych speakerov
+    - dict {speaker_id: path}: per-speaker referencie
     """
     XTTS_LANG_MAP = {
         "sk": "sk", "cs": "cs", "de": "de", "fr": "fr",
@@ -660,8 +664,16 @@ def step_tts_clone(
     model = get_xtts()
     tts_sample_rate = 24000
 
-    # Validate reference audio — XTTS needs at least 3s of clean audio
-    ref_data, ref_sr = sf.read(reference_audio_path, dtype="float32")
+    # Normalize reference_audio_path na dict
+    if isinstance(reference_audio_path, dict):
+        speaker_refs = reference_audio_path
+        default_ref = next(iter(speaker_refs.values()))
+    else:
+        speaker_refs = {}
+        default_ref = reference_audio_path
+
+    # Validate default reference audio
+    ref_data, ref_sr = sf.read(default_ref, dtype="float32")
     ref_duration = len(ref_data) / ref_sr
     logger.info(f"Reference audio: {ref_duration:.1f}s @ {ref_sr}Hz")
     if ref_duration < 3.0:
@@ -684,10 +696,13 @@ def step_tts_clone(
         canvas_offset = int(seg_start_s * tts_sample_rate)
 
         try:
+            # Per-speaker ref audio — fallback na default ak speaker nema vlastny
+            speaker_id = seg.get("speaker", "SPEAKER_00")
+            ref_wav = speaker_refs.get(speaker_id, default_ref)
             tmp_out = os.path.join(workdir, f"seg_{i:04d}.wav")
             model.tts_to_file(
                 text=text,
-                speaker_wav=reference_audio_path,
+                speaker_wav=ref_wav,
                 language=xtts_lang,
                 file_path=tmp_out,
             )
