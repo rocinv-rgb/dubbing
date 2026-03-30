@@ -16,7 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
-# System deps (vrátane pkg-config + libav pre PyAV/MeloTTS build)
+# System deps
 RUN apt-get update && apt-get install -y \
     python3.10 python3-pip \
     ffmpeg sox libsox-dev \
@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Python alias
+# Python alias + build tools
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python3 && \
     ln -sf /usr/bin/python3 /usr/bin/python && \
     pip install --upgrade pip setuptools wheel Cython
@@ -44,20 +44,24 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # --- Krok 3: Coqui TTS (XTTS v2) ---
-RUN pip install --no-cache-dir TTS>=0.22.0
+RUN pip install --no-cache-dir "TTS>=0.22.0"
 
-# --- Krok 4: Fix torch.load weights_only pre XTTS (PyTorch 2.6+ breaking change) ---
+# --- Krok 4: Fix numpy po TTS (TTS downgraduje numpy, pyannote potrebuje >=2.0) ---
+RUN pip install --no-cache-dir "numpy>=2.0" "scipy>=1.15.1" "pandas>=2.2.3" "matplotlib>=3.10.0"
+
+# --- Krok 5: Fix torch.load weights_only pre XTTS (PyTorch 2.6+ breaking change) ---
 RUN sed -i 's/torch\.load(f, map_location=map_location, \*\*kwargs)/torch.load(f, map_location=map_location, weights_only=False)/' \
     /usr/local/lib/python3.10/dist-packages/TTS/utils/io.py
 
-# --- Krok 5: OpenVoice V2 + MeloTTS ---
-# av wheel najprv (PyAV prebuilt — vyhne sa Cython compile problemu)
-RUN pip install --no-cache-dir av
+# --- Krok 6: OpenVoice V2 ---
+# MeloTTS sa NEINSTALLUJE v builde — stahuje sa pri prvom spusteni na pode (pip nema internet v builde)
+# av pinned wheel pre Python 3.10 / Ubuntu 22.04
+RUN pip install --no-cache-dir "av==12.3.0" --only-binary=av || pip install --no-cache-dir "av==12.3.0"
 RUN git clone https://github.com/myshell-ai/OpenVoice /opt/openvoice && \
-    pip install --no-cache-dir -e /opt/openvoice && \
-    pip install --no-cache-dir git+https://github.com/myshell-ai/MeloTTS.git
+    pip install --no-cache-dir -e /opt/openvoice
 
 ENV OPENVOICE_CHECKPOINT_URL="https://myshell-public-repo-host.s3.amazonaws.com/openvoice/checkpoints_v2_0417.zip"
+ENV MELOTTS_INSTALL_ON_STARTUP="true"
 
 # --- App subory ---
 COPY handler.py h_v1.py test_input.json ./
