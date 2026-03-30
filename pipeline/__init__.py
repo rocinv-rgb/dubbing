@@ -72,10 +72,14 @@ def run_dubbing_pipeline(
     job_id: str = "local",
     pause_marker: str | None = None,
     use_openvoice: bool = False,
+    ov_alpha: float = 0.35,
+    ov_tau: float = 0.10,
 ) -> dict:
     """
     Spusti cely pipeline s per-speaker voice cloning.
     Cache sa uklada do CACHE_DIR/<job_id>/ na perzistentnom Volume.
+    ov_alpha: sila prenosu tembru z originalu pre OV2 TCC (0.0-1.0, default 0.35)
+    ov_tau: teplota TCC konverzie (0.0-1.0, default 0.1)
     """
     job_cache = CACHE_DIR / job_id
     job_cache.mkdir(parents=True, exist_ok=True)
@@ -146,7 +150,12 @@ def run_dubbing_pipeline(
             # Enrichment: pre kazdy segment spocita available_duration = slot + pauza do dalsiho
             video_end = segments[-1]["end"] if segments else 0
             segments = enrich_segments_with_available_duration(segments, video_end=video_end)
-            dubbed_voice_tmp = step_tts_clone(segments, speaker_refs, workdir, target_lang, use_openvoice=use_openvoice)
+            dubbed_voice_tmp = step_tts_clone(
+                segments, speaker_refs, workdir, target_lang,
+                use_openvoice=use_openvoice,
+                ov_alpha=ov_alpha,
+                ov_tau=ov_tau,
+            )
             shutil.copy(dubbed_voice_tmp, dubbed_voice_cache)
             dubbed_voice = str(dubbed_voice_cache)
             logger.info(f"Dubbed voice cached: {dubbed_voice_cache}")
