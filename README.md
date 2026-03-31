@@ -1,3 +1,10 @@
+## Vision
+
+"Computer, show me news from China" — and understand every word.
+
+No language barriers. Any video, any language, dubbed into Czech/Slovak automatically.
+We're building the engine that makes this possible.
+
 # AI Dubbing Pipeline
 
 Automated dubbing of foreign-language video into Czech/Slovak using GPU-accelerated AI.
